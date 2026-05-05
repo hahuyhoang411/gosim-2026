@@ -69,7 +69,7 @@ Runs the Express server (hot-reload via `tsx watch`) and Vite dev server concurr
 
 - **Subagent pairing is heuristic.** kimi-cli stores subagent transcripts under separate paths (`subagents/<id>/context.jsonl`), so this app pairs each newly detected subagent file to the oldest unpaired parent `Agent`/`Task` tool call.
 - **Session picker depends on kimi's local metadata.** Workdir paths are recovered from `~/.kimi/kimi.json`; if a hash has no matching path entry, the picker still shows the session but cannot infer the original workdir.
-- **Project name is the workdir-hash short id** (e.g. `a3f4b1`) unless `state.json.title` or `state.json.custom_title` is set, since kimi hashes the workdir path with MD5. Set a session title in kimi-cli to get a friendlier label.
+- **Agent names are inferred locally.** The app uses `state.json.title`, then `state.json.custom_title`, then the first user prompt in `context.jsonl`; only sessions with none of those fall back to the workdir-hash short id.
 - **No `turn_duration` signal.** Idle is inferred from silence — works in practice but reacts a few seconds slower than the Claude version.
 
 ## Office Tileset

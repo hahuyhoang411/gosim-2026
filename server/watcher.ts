@@ -1,14 +1,13 @@
 import { watch } from "chokidar";
-import { statSync, readdirSync, openSync, readSync, closeSync, existsSync, readFileSync } from "fs";
+import { statSync, readdirSync, openSync, readSync, closeSync, existsSync } from "fs";
 import { join, basename, dirname, sep } from "path";
-import { homedir } from "os";
 import { EventEmitter } from "events";
+import { KIMI_SESSIONS_DIR, fallbackNameFromSessionDir, sessionDisplayTitle } from "./kimiMetadata.js";
 
 // kimi-cli stores sessions at:
 //   ~/.kimi/sessions/<workdir-md5>/<session-id>/{context.jsonl, wire.jsonl, state.json}
 // and subagent instances at:
 //   ~/.kimi/sessions/<workdir-md5>/<session-id>/subagents/<agent-id>/context.jsonl
-const KIMI_SESSIONS_DIR = join(homedir(), ".kimi", "sessions");
 const ACTIVE_THRESHOLD_MS = 600_000;
 const POLL_INTERVAL_MS = 1000;
 const PROJECT_NAME_MAX_LENGTH = 24;
@@ -30,28 +29,13 @@ export interface WatchedFile {
   parentToolId?: string;         // the parent's "Agent" tool_call_id this subagent fulfills
 }
 
-function readState(sessionDir: string): { title?: string; mtime?: number } {
-  try {
-    const statePath = join(sessionDir, "state.json");
-    if (!existsSync(statePath)) return {};
-    const stat = statSync(statePath);
-    const state = JSON.parse(readFileSync(statePath, "utf-8")) as { title?: string; custom_title?: string };
-    return { title: state.title || state.custom_title, mtime: stat.mtimeMs };
-  } catch {
-    return {};
-  }
-}
-
-export function projectNameFromTitle(title: string | undefined, fallback: string): string {
-  if (title && title.trim()) {
-    const t = title.trim();
-    return t.length > PROJECT_NAME_MAX_LENGTH ? t.slice(0, PROJECT_NAME_MAX_LENGTH) + "…" : t;
-  }
-  return fallback;
-}
-
-function workdirHashFromSessionDir(sessionDir: string): string {
-  return basename(dirname(sessionDir));
+function projectNameFromSession(sessionDir: string, contextPath: string): { title: string; stateMtime?: number } {
+  return sessionDisplayTitle(
+    sessionDir,
+    contextPath,
+    fallbackNameFromSessionDir(sessionDir),
+    PROJECT_NAME_MAX_LENGTH,
+  );
 }
 
 export class JsonlWatcher extends EventEmitter {
@@ -156,19 +140,17 @@ export class JsonlWatcher extends EventEmitter {
 
     if (cls.kind === "parent") {
       const sessionDir = cls.sessionDir;
-      const state = readState(sessionDir);
-      const fallback = workdirHashFromSessionDir(sessionDir).slice(0, 6) || cls.sessionId.slice(0, 8);
-      const projectName = projectNameFromTitle(state.title, fallback);
+      const display = projectNameFromSession(sessionDir, filePath);
 
       const file: WatchedFile = {
         kind: "parent",
         path: filePath,
         sessionId: cls.sessionId,
-        projectName,
+        projectName: display.title,
         offset: 0,
         lineBuffer: "",
-        stateMtime: state.mtime,
-        lastTitle: state.title,
+        stateMtime: display.stateMtime,
+        lastTitle: display.title,
       };
 
       this.files.set(filePath, file);
@@ -218,12 +200,11 @@ export class JsonlWatcher extends EventEmitter {
 
   private checkParentRename(file: WatchedFile): void {
     const sessionDir = dirname(file.path);
-    const next = readState(sessionDir);
-    file.stateMtime = next.mtime;
-    if (next.title === file.lastTitle) return;
+    const next = projectNameFromSession(sessionDir, file.path);
+    file.stateMtime = next.stateMtime;
+    if (next.title === file.lastTitle && next.title === file.projectName) return;
     file.lastTitle = next.title;
-    const fallback = workdirHashFromSessionDir(sessionDir).slice(0, 6) || file.sessionId.slice(0, 8);
-    const newName = projectNameFromTitle(next.title, fallback);
+    const newName = next.title;
     if (newName === file.projectName) return;
     file.projectName = newName;
     this.emit("fileRenamed", file);
