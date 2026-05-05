@@ -19,10 +19,10 @@ Each kimi-cli agent becomes a character that walks around, sits at a desk, and v
 ## Quick Start
 
 ```bash
-npm install
-cd webview-ui && npm install && cd ..
-npm run build
-npm start
+bun install
+bun install --cwd webview-ui
+bun run build
+bun run start
 ```
 
 Open `http://localhost:3456` in your browser. The server scans `~/.kimi/sessions/` for sessions modified in the last 10 minutes and shows agents in real time.
@@ -52,7 +52,7 @@ Edit `scripts/kimi-hook.sh` and set `PIXEL_AGENTS_DIR` to wherever you cloned th
 ## Development
 
 ```bash
-npm run dev
+bun run dev
 ```
 
 Runs the Express server (hot-reload via `tsx watch`) and Vite dev server concurrently.
@@ -77,7 +77,7 @@ Runs the Express server (hot-reload via `tsx watch`) and Vite dev server concurr
 Same as upstream. The built-in layout uses basic furniture; for the full 452-piece catalog, purchase the [Office Interior Tileset](https://donarg.itch.io/office-interior-tileset-16x16) by Donarg ($2 on itch.io), place it at `assets/office_tileset_16x16.png`, and run:
 
 ```bash
-npm run extract-furniture
+bun run extract-furniture
 ```
 
 ## Credits

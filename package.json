@@ -4,15 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently \"npm run dev:server\" \"npm run dev:ui\"",
-    "dev:server": "tsx watch server/index.ts",
-    "dev:ui": "npm --prefix webview-ui run dev",
-    "build": "npm run build:server && npm run build:ui",
-    "build:server": "esbuild server/index.ts --bundle --platform=node --format=esm --outfile=dist/server.js --external:chokidar --external:ws --external:express --external:pngjs",
-    "build:ui": "cd webview-ui && npx vite build --outDir ../dist/public && cp -r public/assets ../dist/public/assets",
-    "start": "node dist/server.js",
-    "import-tileset": "tsx scripts/import-tileset.ts",
-    "extract-furniture": "tsx scripts/extract-furniture.ts"
+    "dev": "bunx concurrently \"bun run dev:server\" \"bun run dev:ui\"",
+    "dev:server": "bunx tsx watch server/index.ts",
+    "dev:ui": "cd webview-ui && bun run dev",
+    "build": "bun run build:server && bun run build:ui",
+    "build:server": "bunx esbuild server/index.ts --bundle --platform=node --format=esm --outfile=dist/server.js --external:chokidar --external:ws --external:express --external:pngjs",
+    "build:ui": "cd webview-ui && bun run build",
+    "start": "bun dist/server.js",
+    "import-tileset": "bunx tsx scripts/import-tileset.ts",
+    "extract-furniture": "bunx tsx scripts/extract-furniture.ts"
   },
   "dependencies": {
     "chokidar": "^4.0.0",
