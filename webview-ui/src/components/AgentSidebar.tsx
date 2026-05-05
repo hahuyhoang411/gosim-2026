@@ -1,7 +1,13 @@
-import type { CSSProperties } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import type { OfficeState } from '../office/engine/officeState.js'
 import type { AgentPresence, AgentTimelineEvent, ToolActivity } from '../office/types.js'
-import type { SubagentCharacter } from '../hooks/useExtensionMessages.js'
+import type {
+  AgentChatEntry,
+  AgentProcessInfo,
+  AgentRequestMessage,
+  AgentTurnState,
+  SubagentCharacter,
+} from '../hooks/useExtensionMessages.js'
 import { flattenSubagentTools, getPresenceMeta, PRESENCE_META } from '../office/presence.js'
 
 interface AgentSidebarProps {
@@ -11,11 +17,19 @@ interface AgentSidebarProps {
   agentTools: Record<number, ToolActivity[]>
   agentStatuses: Record<number, string>
   agentPresences: Record<number, AgentPresence>
+  agentChats: Record<number, AgentChatEntry[]>
+  agentTurnStates: Record<number, AgentTurnState>
+  agentProcessStates: Record<number, AgentProcessInfo>
+  agentRequests: Record<number, AgentRequestMessage[]>
   subagentTools: Record<number, Record<string, ToolActivity[]>>
   subagentCharacters: SubagentCharacter[]
   eventLog: AgentTimelineEvent[]
   onSelectAgent: (id: number) => void
   onCloseAgent: (id: number) => void
+  onSendAgentMessage: (agentId: number, text: string) => void
+  onCancelAgentTurn: (agentId: number) => void
+  onRespondApproval: (agentId: number, requestId: string, response: 'approve' | 'approve_for_session' | 'reject', feedback?: string) => void
+  onRespondQuestion: (agentId: number, requestId: string, answers: Record<string, string>) => void
 }
 
 const sidebarStyle: CSSProperties = {
@@ -115,6 +129,241 @@ function PresencePill({ presence }: { presence: AgentPresence }) {
   )
 }
 
+function payloadText(payload: Record<string, unknown>, fallback: string): string {
+  const description = payload.description
+  const action = payload.action
+  if (typeof description === 'string' && description.trim()) return description
+  if (typeof action === 'string' && action.trim()) return action
+  return fallback
+}
+
+function RequestCard({
+  agentId,
+  request,
+  onRespondApproval,
+  onRespondQuestion,
+}: {
+  agentId: number
+  request: AgentRequestMessage
+  onRespondApproval: AgentSidebarProps['onRespondApproval']
+  onRespondQuestion: AgentSidebarProps['onRespondQuestion']
+}) {
+  const payload = request.payload || {}
+  if (request.requestType === 'QuestionRequest') {
+    const questions = Array.isArray(payload.questions) ? payload.questions as Array<Record<string, unknown>> : []
+    const first = questions[0]
+    const question = typeof first?.question === 'string' ? first.question : 'Choose an answer'
+    const options = Array.isArray(first?.options) ? first.options as Array<Record<string, unknown>> : []
+    return (
+      <div style={{ border: '2px solid var(--pixel-status-waiting)', padding: 6, background: 'rgba(209, 134, 22, 0.12)' }}>
+        <div style={{ fontSize: 18, color: 'var(--pixel-status-waiting)' }}>Question</div>
+        <div style={{ fontSize: 19, color: 'var(--vscode-foreground)', marginBottom: 5 }}>{question}</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {options.length === 0 ? (
+            <button
+              onClick={() => onRespondQuestion(agentId, request.requestId, {})}
+              style={miniButtonStyle}
+            >
+              Dismiss
+            </button>
+          ) : options.map((option) => {
+            const label = typeof option.label === 'string' ? option.label : 'Option'
+            const description = typeof option.description === 'string' ? option.description : ''
+            return (
+              <button
+                key={label}
+                onClick={() => onRespondQuestion(agentId, request.requestId, { [question]: label })}
+                style={{ ...miniButtonStyle, textAlign: 'left' }}
+              >
+                {label}
+                {description && <span style={{ display: 'block', color: 'var(--pixel-text-dim)', fontSize: 15 }}>{description}</span>}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
+
+  const description = payloadText(payload, request.requestType)
+  return (
+    <div style={{ border: '2px solid var(--pixel-status-permission)', padding: 6, background: 'rgba(204, 167, 0, 0.12)' }}>
+      <div style={{ fontSize: 18, color: 'var(--pixel-status-permission)' }}>Approval needed</div>
+      <div style={{ fontSize: 18, color: 'var(--vscode-foreground)', marginBottom: 5 }}>{description}</div>
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        <button style={miniButtonStyle} onClick={() => onRespondApproval(agentId, request.requestId, 'approve')}>Approve</button>
+        <button style={miniButtonStyle} onClick={() => onRespondApproval(agentId, request.requestId, 'approve_for_session')}>Session</button>
+        <button style={{ ...miniButtonStyle, color: 'var(--pixel-status-error)' }} onClick={() => onRespondApproval(agentId, request.requestId, 'reject')}>Reject</button>
+      </div>
+    </div>
+  )
+}
+
+const miniButtonStyle: CSSProperties = {
+  background: 'var(--pixel-btn-bg)',
+  color: 'var(--pixel-text)',
+  border: '2px solid var(--pixel-border)',
+  borderRadius: 0,
+  padding: '3px 6px',
+  fontSize: 17,
+  cursor: 'pointer',
+}
+
+function ChatPanel({
+  agentId,
+  messages,
+  requests,
+  turnState,
+  process,
+  onSendAgentMessage,
+  onCancelAgentTurn,
+  onRespondApproval,
+  onRespondQuestion,
+}: {
+  agentId: number | null | undefined
+  messages: AgentChatEntry[]
+  requests: AgentRequestMessage[]
+  turnState: AgentTurnState | undefined
+  process: AgentProcessInfo | undefined
+  onSendAgentMessage: AgentSidebarProps['onSendAgentMessage']
+  onCancelAgentTurn: AgentSidebarProps['onCancelAgentTurn']
+  onRespondApproval: AgentSidebarProps['onRespondApproval']
+  onRespondQuestion: AgentSidebarProps['onRespondQuestion']
+}) {
+  const [draft, setDraft] = useState('')
+  const listRef = useRef<HTMLDivElement>(null)
+  const isDirectChatAgent = process?.state === 'ready'
+  const canSend = agentId !== null
+    && agentId !== undefined
+    && draft.trim().length > 0
+    && isDirectChatAgent
+  const running = turnState === 'running' || turnState === 'waiting_for_approval' || turnState === 'waiting_for_answer'
+
+  useEffect(() => {
+    listRef.current?.scrollTo({ top: listRef.current.scrollHeight })
+  }, [messages.length, requests.length, agentId])
+
+  const send = () => {
+    if (!canSend || agentId === null || agentId === undefined) return
+    onSendAgentMessage(agentId, draft)
+    setDraft('')
+  }
+
+  const stateLabel = !process
+    ? 'External'
+    : process.state === 'starting'
+      ? 'Starting'
+      : process.state === 'crashed'
+      ? 'Crashed'
+      : process.state === 'exited'
+        ? 'Exited'
+        : turnState === 'waiting_for_approval'
+          ? 'Approval'
+          : turnState === 'waiting_for_answer'
+            ? 'Question'
+            : turnState === 'running'
+              ? 'Running'
+              : 'Ready'
+
+  return (
+    <div style={{ ...panelStyle, minHeight: 215, maxHeight: 320, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div style={{ padding: '8px 10px 4px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <div style={sectionTitleStyle}>Chat</div>
+        <span style={{ color: process?.state === 'crashed' ? 'var(--pixel-status-error)' : running ? 'var(--pixel-status-active)' : 'var(--pixel-text-dim)', fontSize: 17 }}>
+          {stateLabel}
+        </span>
+      </div>
+
+      <div ref={listRef} style={{ padding: '0 10px 6px', overflow: 'auto', minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', gap: 5 }}>
+        {messages.length === 0 && requests.length === 0 ? (
+          <div style={{ fontSize: 19, color: 'var(--pixel-text-dim)' }}>
+            {agentId === null || agentId === undefined ? 'Select an agent to chat.' : 'No chat yet.'}
+          </div>
+        ) : messages.map((message) => (
+          <div
+            key={message.id}
+            style={{
+              alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start',
+              maxWidth: '92%',
+              background: message.role === 'user'
+                ? 'rgba(90, 140, 255, 0.18)'
+                : message.role === 'assistant'
+                  ? 'rgba(90, 200, 140, 0.16)'
+                  : message.role === 'thinking'
+                    ? 'rgba(180, 140, 255, 0.12)'
+                    : 'rgba(255, 255, 255, 0.08)',
+              border: `1px solid ${message.role === 'user'
+                ? 'rgba(90, 140, 255, 0.55)'
+                : message.role === 'assistant'
+                  ? 'rgba(90, 200, 140, 0.55)'
+                  : 'rgba(255, 255, 255, 0.16)'}`,
+              padding: '4px 6px',
+              fontSize: 18,
+              color: 'var(--vscode-foreground)',
+              whiteSpace: 'pre-wrap',
+              overflowWrap: 'anywhere',
+            }}
+          >
+            <div style={{ color: 'var(--pixel-text-dim)', fontSize: 14, marginBottom: 1 }}>
+              {message.role === 'thinking' ? 'thinking' : message.source === 'steer' ? 'steer' : message.role}
+            </div>
+            {message.text}
+          </div>
+        ))}
+
+        {agentId !== null && agentId !== undefined && requests.map((request) => (
+          <RequestCard
+            key={request.requestId}
+            agentId={agentId}
+            request={request}
+            onRespondApproval={onRespondApproval}
+            onRespondQuestion={onRespondQuestion}
+          />
+        ))}
+      </div>
+
+      <div style={{ padding: '6px 10px 9px', display: 'grid', gridTemplateColumns: running ? '1fr auto auto' : '1fr auto', gap: 5 }}>
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              send()
+            }
+          }}
+          placeholder={!process ? 'Open a New Kimi Agent for direct chat…' : running ? 'Steer the running turn…' : 'Message Kimi…'}
+          disabled={!isDirectChatAgent}
+          rows={2}
+          style={{
+            minWidth: 0,
+            resize: 'none',
+            background: 'rgba(255, 255, 255, 0.08)',
+            color: 'var(--pixel-text)',
+            border: '2px solid var(--pixel-border)',
+            borderRadius: 0,
+            padding: '4px 6px',
+            fontSize: 18,
+            outline: 'none',
+          }}
+        />
+        {running && agentId !== null && agentId !== undefined && (
+          <button style={{ ...miniButtonStyle, color: 'var(--pixel-status-error)' }} onClick={() => onCancelAgentTurn(agentId)}>
+            Cancel
+          </button>
+        )}
+        <button
+          style={{ ...miniButtonStyle, opacity: canSend ? 1 : 0.45, cursor: canSend ? 'pointer' : 'default' }}
+          onClick={send}
+          disabled={!canSend}
+        >
+          {running ? 'Steer' : 'Send'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function EventRow({ event }: { event: AgentTimelineEvent }) {
   const presence = event.presence
   const color = presence ? PRESENCE_META[presence].color : 'var(--pixel-text-dim)'
@@ -161,11 +410,19 @@ export function AgentSidebar({
   agentTools,
   agentStatuses,
   agentPresences,
+  agentChats,
+  agentTurnStates,
+  agentProcessStates,
+  agentRequests,
   subagentTools,
   subagentCharacters,
   eventLog,
   onSelectAgent,
   onCloseAgent,
+  onSendAgentMessage,
+  onCancelAgentTurn,
+  onRespondApproval,
+  onRespondQuestion,
 }: AgentSidebarProps) {
   const selectedCh = selectedAgent === null ? null : officeState.characters.get(selectedAgent)
   const selectedParentId = selectedCh?.isSubagent ? selectedCh.parentAgentId : selectedAgent
@@ -192,6 +449,10 @@ export function AgentSidebar({
   const recentEvents = selectedParentId === null || selectedParentId === undefined
     ? eventLog.slice(0, 20)
     : eventLog.filter((event) => event.agentId === selectedParentId).slice(0, 20)
+  const selectedChat = selectedParentId === null || selectedParentId === undefined ? [] : agentChats[selectedParentId] || []
+  const selectedRequests = selectedParentId === null || selectedParentId === undefined ? [] : agentRequests[selectedParentId] || []
+  const selectedTurnState = selectedParentId === null || selectedParentId === undefined ? undefined : agentTurnStates[selectedParentId]
+  const selectedProcess = selectedParentId === null || selectedParentId === undefined ? undefined : agentProcessStates[selectedParentId]
 
   return (
     <aside style={sidebarStyle}>
@@ -298,6 +559,18 @@ export function AgentSidebar({
           </button>
         )}
       </div>
+
+      <ChatPanel
+        agentId={selectedParentId}
+        messages={selectedChat}
+        requests={selectedRequests}
+        turnState={selectedTurnState}
+        process={selectedProcess}
+        onSendAgentMessage={onSendAgentMessage}
+        onCancelAgentTurn={onCancelAgentTurn}
+        onRespondApproval={onRespondApproval}
+        onRespondQuestion={onRespondQuestion}
+      />
 
       <div style={{ ...panelStyle, minHeight: 0, flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: '8px 10px 4px' }}>

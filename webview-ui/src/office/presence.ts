@@ -63,13 +63,19 @@ export function deriveAgentPresence(
   if (isErrorLike(status) || tools.some((tool) => isErrorLike(tool.status)) || subTools.some((tool) => isErrorLike(tool.status))) {
     return 'error'
   }
+  if (status === 'running' || status === 'starting') {
+    return 'active'
+  }
   if (tools.some((tool) => tool.permissionWait && !tool.done) || subTools.some((tool) => tool.permissionWait && !tool.done)) {
+    return 'permission'
+  }
+  if (status === 'waiting for approval') {
     return 'permission'
   }
   if (subTools.some((tool) => !tool.done)) {
     return 'subagent'
   }
-  if (status === 'waiting') {
+  if (status === 'waiting' || status === 'waiting for answer') {
     return 'waiting'
   }
   if (tools.some((tool) => !tool.done)) {

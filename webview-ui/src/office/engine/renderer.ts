@@ -447,6 +447,139 @@ export function renderRotateButton(
 
 // ── Speech bubbles ──────────────────────────────────────────────
 
+const TEXT_BUBBLE_MAX_CHARS = 180
+const TEXT_BUBBLE_MAX_LINES = 4
+
+function truncateText(text: string, maxChars: number): string {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxChars) return normalized
+  return `${normalized.slice(0, maxChars - 1)}…`
+}
+
+function wrapBubbleText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, maxLines: number): string[] {
+  const words = truncateText(text, TEXT_BUBBLE_MAX_CHARS).split(/\s+/).filter(Boolean)
+  const lines: string[] = []
+  let current = ''
+
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word
+    if (ctx.measureText(candidate).width <= maxWidth || !current) {
+      current = candidate
+      continue
+    }
+    lines.push(current)
+    current = word
+    if (lines.length === maxLines) break
+  }
+  if (current && lines.length < maxLines) lines.push(current)
+
+  if (lines.length === maxLines && words.join(' ').length > lines.join(' ').length) {
+    const last = lines[maxLines - 1]
+    let clipped = last
+    while (clipped.length > 1 && ctx.measureText(`${clipped}…`).width > maxWidth) {
+      clipped = clipped.slice(0, -1)
+    }
+    lines[maxLines - 1] = `${clipped}…`
+  }
+  return lines.length > 0 ? lines : ['…']
+}
+
+function roundedRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
+  const radius = Math.min(r, w / 2, h / 2)
+  ctx.beginPath()
+  ctx.moveTo(x + radius, y)
+  ctx.lineTo(x + w - radius, y)
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius)
+  ctx.lineTo(x + w, y + h - radius)
+  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h)
+  ctx.lineTo(x + radius, y + h)
+  ctx.quadraticCurveTo(x, y + h, x, y + h - radius)
+  ctx.lineTo(x, y + radius)
+  ctx.quadraticCurveTo(x, y, x + radius, y)
+  ctx.closePath()
+}
+
+function textBubblePalette(kind: Character['bubbleKind']): { fill: string; stroke: string; text: string } {
+  switch (kind) {
+    case 'user':
+      return { fill: '#dff3ff', stroke: '#5a8cff', text: '#122033' }
+    case 'steer':
+      return { fill: '#fff1cf', stroke: '#d18616', text: '#2b1b00' }
+    case 'system':
+      return { fill: '#eceaff', stroke: '#8f7af5', text: '#1d1738' }
+    case 'error':
+      return { fill: '#ffe0dc', stroke: '#f48771', text: '#3b0905' }
+    case 'assistant':
+    default:
+      return { fill: '#efffec', stroke: '#5ac88c', text: '#102414' }
+  }
+}
+
+function renderTextBubble(
+  ctx: CanvasRenderingContext2D,
+  ch: Character,
+  offsetX: number,
+  offsetY: number,
+  zoom: number,
+  alpha: number,
+): void {
+  const text = ch.bubbleText || ''
+  if (!text) return
+
+  const fontSize = Math.max(11, Math.round(9 * zoom))
+  const paddingX = Math.round(6 * zoom)
+  const paddingY = Math.round(4 * zoom)
+  const maxTextWidth = Math.round(150 * zoom)
+  const lineHeight = Math.round(fontSize * 1.18)
+  const tail = Math.max(4, Math.round(4 * zoom))
+
+  ctx.save()
+  ctx.font = `${fontSize}px "FS Pixel Sans", monospace`
+  ctx.textBaseline = 'top'
+  const lines = wrapBubbleText(ctx, text, maxTextWidth, TEXT_BUBBLE_MAX_LINES)
+  const textWidth = Math.min(maxTextWidth, Math.max(...lines.map((line) => ctx.measureText(line).width)))
+  const bubbleW = Math.ceil(textWidth + paddingX * 2)
+  const bubbleH = paddingY * 2 + lineHeight * lines.length
+
+  const sittingOff = ch.state === CharacterState.TYPE ? BUBBLE_SITTING_OFFSET_PX : 0
+  const bubbleX = Math.round(offsetX + ch.x * zoom - bubbleW / 2)
+  const bubbleY = Math.round(offsetY + (ch.y + sittingOff - BUBBLE_VERTICAL_OFFSET_PX) * zoom - bubbleH - tail - 1 * zoom)
+  const palette = textBubblePalette(ch.bubbleKind)
+
+  if (alpha < 1) ctx.globalAlpha = alpha
+  // Shadow.
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.32)'
+  roundedRectPath(ctx, bubbleX + 2 * zoom, bubbleY + 2 * zoom, bubbleW, bubbleH, 3 * zoom)
+  ctx.fill()
+
+  // Body.
+  ctx.fillStyle = palette.fill
+  roundedRectPath(ctx, bubbleX, bubbleY, bubbleW, bubbleH, 3 * zoom)
+  ctx.fill()
+  ctx.strokeStyle = palette.stroke
+  ctx.lineWidth = Math.max(1, Math.round(1.5 * zoom))
+  ctx.stroke()
+
+  // Tail.
+  const tailX = Math.round(offsetX + ch.x * zoom)
+  const tailY = bubbleY + bubbleH
+  ctx.beginPath()
+  ctx.moveTo(tailX - tail, tailY - 1)
+  ctx.lineTo(tailX + tail, tailY - 1)
+  ctx.lineTo(tailX, tailY + tail)
+  ctx.closePath()
+  ctx.fillStyle = palette.fill
+  ctx.fill()
+  ctx.strokeStyle = palette.stroke
+  ctx.stroke()
+
+  ctx.fillStyle = palette.text
+  lines.forEach((line, idx) => {
+    ctx.fillText(line, bubbleX + paddingX, bubbleY + paddingY + idx * lineHeight)
+  })
+  ctx.restore()
+}
+
 export function renderBubbles(
   ctx: CanvasRenderingContext2D,
   characters: Character[],
@@ -456,6 +589,15 @@ export function renderBubbles(
 ): void {
   for (const ch of characters) {
     if (!ch.bubbleType) continue
+
+    if (ch.bubbleType === 'text') {
+      let alpha = 1.0
+      if (ch.bubbleTimer < BUBBLE_FADE_DURATION_SEC) {
+        alpha = ch.bubbleTimer / BUBBLE_FADE_DURATION_SEC
+      }
+      renderTextBubble(ctx, ch, offsetX, offsetY, zoom, alpha)
+      continue
+    }
 
     const sprite = ch.bubbleType === 'permission'
       ? BUBBLE_PERMISSION_SPRITE

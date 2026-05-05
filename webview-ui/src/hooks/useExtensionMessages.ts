@@ -50,12 +50,43 @@ export interface KimiSessionSummary {
   active: boolean
 }
 
+export type AgentChatRole = 'user' | 'assistant' | 'thinking' | 'system' | 'tool'
+export type AgentTurnState = 'idle' | 'running' | 'waiting_for_approval' | 'waiting_for_answer' | 'cancelled' | 'error'
+export type AgentProcessState = 'starting' | 'ready' | 'exited' | 'crashed'
+export type AgentBubbleKind = 'user' | 'assistant' | 'system' | 'steer' | 'error'
+
+export interface AgentChatEntry {
+  id: string
+  agentId: number
+  role: AgentChatRole
+  text: string
+  createdAt: number
+  source?: 'prompt' | 'steer' | 'wire' | 'system' | 'request'
+  turnId?: string
+}
+
+export interface AgentRequestMessage {
+  requestId: string
+  requestType: string
+  payload: Record<string, unknown>
+}
+
+export interface AgentProcessInfo {
+  state: AgentProcessState
+  pid?: number
+  error?: string
+}
+
 export interface ExtensionMessageState {
   agents: number[]
   selectedAgent: number | null
   agentTools: Record<number, ToolActivity[]>
   agentStatuses: Record<number, string>
   agentPresences: Record<number, AgentPresence>
+  agentChats: Record<number, AgentChatEntry[]>
+  agentTurnStates: Record<number, AgentTurnState>
+  agentProcessStates: Record<number, AgentProcessInfo>
+  agentRequests: Record<number, AgentRequestMessage[]>
   subagentTools: Record<number, Record<string, ToolActivity[]>>
   subagentCharacters: SubagentCharacter[]
   eventLog: AgentTimelineEvent[]
@@ -93,6 +124,10 @@ export function useExtensionMessages(
   const [selectedAgent, setSelectedAgent] = useState<number | null>(null)
   const [agentTools, setAgentTools] = useState<Record<number, ToolActivity[]>>({})
   const [agentStatuses, setAgentStatuses] = useState<Record<number, string>>({})
+  const [agentChats, setAgentChats] = useState<Record<number, AgentChatEntry[]>>({})
+  const [agentTurnStates, setAgentTurnStates] = useState<Record<number, AgentTurnState>>({})
+  const [agentProcessStates, setAgentProcessStates] = useState<Record<number, AgentProcessInfo>>({})
+  const [agentRequests, setAgentRequests] = useState<Record<number, AgentRequestMessage[]>>({})
   const [subagentTools, setSubagentTools] = useState<Record<number, Record<string, ToolActivity[]>>>({})
   const [subagentCharacters, setSubagentCharacters] = useState<SubagentCharacter[]>([])
   const [eventLog, setEventLog] = useState<AgentTimelineEvent[]>([])
@@ -215,6 +250,30 @@ export function useExtensionMessages(
           return next
         })
         setAgentStatuses((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+        setAgentChats((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+        setAgentTurnStates((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+        setAgentProcessStates((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+        setAgentRequests((prev) => {
           if (!(id in prev)) return prev
           const next = { ...prev }
           delete next[id]
@@ -346,6 +405,122 @@ export function useExtensionMessages(
           os.showWaitingBubble(id)
           playDoneSound()
         }
+      } else if (msg.type === 'agentChatEntry') {
+        const id = msg.agentId as number
+        const entry = msg.entry as AgentChatEntry
+        setAgentChats((prev) => {
+          const list = prev[id] || []
+          if (list.some((item) => item.id === entry.id)) return prev
+          return { ...prev, [id]: [...list, entry] }
+        })
+        if (entry.role === 'user' || entry.role === 'assistant') {
+          appendEvent({
+            type: 'agentChatEntry',
+            agentId: id,
+            title: entry.role === 'user' ? 'User message' : 'Assistant response',
+            detail: compactText(entry.text),
+            presence: entry.role === 'user' ? 'active' : deriveAgentPresence(id, agentToolsRef.current, agentStatusesRef.current, subagentToolsRef.current),
+          })
+        }
+      } else if (msg.type === 'agentBubble') {
+        const id = msg.agentId as number
+        const text = msg.text as string
+        const kind = msg.kind as AgentBubbleKind
+        const ttlMs = typeof msg.ttlMs === 'number' ? msg.ttlMs : undefined
+        os.showTextBubble(id, text, kind, ttlMs ? ttlMs / 1000 : undefined)
+      } else if (msg.type === 'agentTurnState') {
+        const id = msg.agentId as number
+        const turnState = msg.turnState as AgentTurnState
+        setAgentTurnStates((prev) => ({ ...prev, [id]: turnState }))
+        setAgentStatuses((prev) => {
+          const next = { ...prev }
+          if (turnState === 'running') {
+            next[id] = 'running'
+          } else if (turnState === 'waiting_for_approval') {
+            next[id] = 'waiting for approval'
+          } else if (turnState === 'waiting_for_answer') {
+            next[id] = 'waiting for answer'
+          } else if (turnState === 'error') {
+            next[id] = 'error'
+          } else {
+            delete next[id]
+          }
+          return next
+        })
+        os.setAgentActive(id, turnState === 'running' || turnState === 'waiting_for_approval' || turnState === 'waiting_for_answer')
+        if (turnState === 'waiting_for_approval') {
+          os.showPermissionBubble(id)
+        } else if (turnState === 'running' || turnState === 'idle' || turnState === 'cancelled') {
+          os.clearPermissionBubble(id)
+        }
+        appendEvent({
+          type: 'agentTurnState',
+          agentId: id,
+          title: 'Turn state',
+          detail: turnState,
+          presence: turnState === 'error'
+            ? 'error'
+            : turnState === 'waiting_for_approval'
+              ? 'permission'
+              : turnState === 'waiting_for_answer'
+                ? 'waiting'
+                : turnState === 'running'
+                  ? 'active'
+                  : 'idle',
+        })
+      } else if (msg.type === 'agentProcessState') {
+        const id = msg.agentId as number
+        const state = msg.state as AgentProcessState
+        const pid = typeof msg.pid === 'number' ? msg.pid : undefined
+        const error = typeof msg.error === 'string' ? msg.error : undefined
+        setAgentProcessStates((prev) => ({ ...prev, [id]: { state, pid, error } }))
+        setAgentStatuses((prev) => {
+          const next = { ...prev }
+          if (state === 'starting') next[id] = 'starting'
+          if (state === 'ready' && next[id] === 'starting') delete next[id]
+          if (state === 'crashed') next[id] = error || 'error'
+          if (state === 'exited') next[id] = 'exited'
+          return next
+        })
+        if (state === 'crashed' && error) {
+          os.showTextBubble(id, error, 'error', 8)
+        }
+        appendEvent({
+          type: 'agentProcessState',
+          agentId: id,
+          title: state === 'ready' ? 'Kimi ready' : state === 'starting' ? 'Kimi starting' : state === 'exited' ? 'Kimi exited' : 'Kimi crashed',
+          detail: error || (pid ? `pid ${pid}` : state),
+          presence: state === 'crashed' ? 'error' : state === 'starting' ? 'active' : 'idle',
+        })
+      } else if (msg.type === 'agentRequest') {
+        const id = msg.agentId as number
+        const request = msg.request as AgentRequestMessage
+        setAgentRequests((prev) => {
+          const list = prev[id] || []
+          const nextList = list.some((item) => item.requestId === request.requestId)
+            ? list.map((item) => (item.requestId === request.requestId ? request : item))
+            : [...list, request]
+          return { ...prev, [id]: nextList }
+        })
+        appendEvent({
+          type: 'agentRequest',
+          agentId: id,
+          title: request.requestType === 'ApprovalRequest' ? 'Approval requested' : 'Input requested',
+          detail: compactText(String((request.payload.description || request.payload.action || request.requestType) ?? 'Request')),
+          presence: request.requestType === 'ApprovalRequest' ? 'permission' : 'waiting',
+        })
+        if (request.requestType === 'ApprovalRequest') {
+          os.showPermissionBubble(id)
+        }
+      } else if (msg.type === 'agentRequestResolved') {
+        const id = msg.agentId as number
+        const requestId = msg.requestId as string
+        setAgentRequests((prev) => {
+          const list = prev[id]
+          if (!list) return prev
+          const nextList = list.filter((item) => item.requestId !== requestId)
+          return { ...prev, [id]: nextList }
+        })
       } else if (msg.type === 'agentToolPermission') {
         const id = msg.id as number
         appendEvent({
@@ -545,7 +720,7 @@ export function useExtensionMessages(
     window.addEventListener('message', handler)
     vscode.postMessage({ type: 'webviewReady' })
     return () => window.removeEventListener('message', handler)
-  }, [getOfficeState])
+  }, [getOfficeState, isEditDirty, onLayoutLoaded])
 
   return {
     agents,
@@ -553,6 +728,10 @@ export function useExtensionMessages(
     agentTools,
     agentStatuses,
     agentPresences,
+    agentChats,
+    agentTurnStates,
+    agentProcessStates,
+    agentRequests,
     subagentTools,
     subagentCharacters,
     eventLog,
