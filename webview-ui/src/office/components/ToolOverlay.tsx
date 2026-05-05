@@ -1,14 +1,16 @@
 import { useState, useEffect } from 'react'
-import type { ToolActivity } from '../types.js'
+import type { AgentPresence, ToolActivity } from '../types.js'
 import type { OfficeState } from '../engine/officeState.js'
 import type { SubagentCharacter } from '../../hooks/useExtensionMessages.js'
 import { TILE_SIZE, CharacterState } from '../types.js'
 import { TOOL_OVERLAY_VERTICAL_OFFSET, CHARACTER_SITTING_OFFSET_PX } from '../../constants.js'
+import { getPresenceMeta } from '../presence.js'
 
 interface ToolOverlayProps {
   officeState: OfficeState
   agents: number[]
   agentTools: Record<number, ToolActivity[]>
+  agentPresences: Record<number, AgentPresence>
   subagentCharacters: SubagentCharacter[]
   containerRef: React.RefObject<HTMLDivElement | null>
   zoom: number
@@ -21,7 +23,13 @@ function getActivityText(
   agentId: number,
   agentTools: Record<number, ToolActivity[]>,
   isActive: boolean,
+  presence: AgentPresence,
 ): string {
+  if (presence === 'permission') return 'Needs approval'
+  if (presence === 'waiting') return 'Waiting'
+  if (presence === 'error') return 'Error'
+  if (presence === 'subagent') return 'Subagent active'
+
   const tools = agentTools[agentId]
   if (tools && tools.length > 0) {
     // Find the latest non-done tool
@@ -44,6 +52,7 @@ export function ToolOverlay({
   officeState,
   agents,
   agentTools,
+  agentPresences,
   subagentCharacters,
   containerRef,
   zoom,
@@ -100,31 +109,24 @@ export function ToolOverlay({
 
         // Get activity text (only needed when showing details)
         let activityText = ''
-        let dotColor: string | null = null
+        let presence: AgentPresence = 'idle'
         if (showDetails) {
           const subHasPermission = isSub && ch.bubbleType === 'permission'
           if (isSub) {
             if (subHasPermission) {
               activityText = 'Needs approval'
+              presence = 'permission'
             } else {
               const sub = subagentCharacters.find((s) => s.id === id)
               activityText = sub ? sub.label : 'Subtask'
+              presence = ch.isActive ? 'active' : 'idle'
             }
           } else {
-            activityText = getActivityText(id, agentTools, ch.isActive)
-          }
-
-          const tools = agentTools[id]
-          const hasPermission = subHasPermission || tools?.some((t) => t.permissionWait && !t.done)
-          const hasActiveTools = tools?.some((t) => !t.done)
-          const isActive = ch.isActive
-
-          if (hasPermission) {
-            dotColor = 'var(--pixel-status-permission)'
-          } else if (isActive && hasActiveTools) {
-            dotColor = 'var(--pixel-status-active)'
+            presence = agentPresences[id] || (ch.isActive ? 'active' : 'idle')
+            activityText = getActivityText(id, agentTools, ch.isActive, presence)
           }
         }
+        const dotColor = showDetails && presence !== 'idle' ? getPresenceMeta(presence).color : null
 
         return (
           <div
@@ -160,7 +162,7 @@ export function ToolOverlay({
               >
                 {dotColor && (
                   <span
-                    className={ch.isActive && dotColor !== 'var(--pixel-status-permission)' ? 'pixel-agents-pulse' : undefined}
+                    className={(presence === 'active' || presence === 'subagent') ? 'pixel-agents-pulse' : undefined}
                     style={{
                       width: 6,
                       height: 6,

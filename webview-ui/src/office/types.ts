@@ -81,6 +81,33 @@ export interface ToolActivity {
   permissionWait?: boolean
 }
 
+export type AgentPresence = 'idle' | 'active' | 'subagent' | 'permission' | 'waiting' | 'error'
+
+export type AgentTimelineEventType =
+  | 'agentStatus'
+  | 'agentToolStart'
+  | 'agentToolDone'
+  | 'agentToolPermission'
+  | 'agentToolPermissionClear'
+  | 'subagentToolStart'
+  | 'subagentToolDone'
+  | 'subagentToolPermission'
+  | 'agentRenamed'
+  | 'agentClosed'
+  | 'agentCreated'
+
+export interface AgentTimelineEvent {
+  eventId: string
+  timestamp: number
+  agentId: number
+  type: AgentTimelineEventType
+  title: string
+  detail?: string
+  toolId?: string
+  parentToolId?: string
+  presence?: AgentPresence
+}
+
 export const FurnitureType = {
   // Original hand-drawn sprites (kept for backward compat)
   DESK: 'desk',

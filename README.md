@@ -5,7 +5,7 @@ A standalone web app that visualizes your **[kimi-cli](https://github.com/Moonsh
 Each kimi-cli agent becomes a character that walks around, sits at a desk, and visually reflects what it's doing — writing code, running tools, waiting for permission, or idle.
 
 > **Forked from `pixel-agents-standalone` (originally a Claude Code visualizer).**
-> The watcher and parser have been rewritten to read kimi-cli's session transcripts under `~/.kimi/sessions/`. UI, sprites, and layout editor are unchanged.
+> The watcher and parser have been rewritten to read kimi-cli's session transcripts under `~/.kimi/sessions/`. The UI keeps the upstream pixel-office feel, with added kimi session picking, agent detail sidebar, presence states, and subagent timeline support.
 
 ## What's Different from the Claude Code version
 
@@ -26,6 +26,14 @@ npm start
 ```
 
 Open `http://localhost:3456` in your browser. The server scans `~/.kimi/sessions/` for sessions modified in the last 10 minutes and shows agents in real time.
+
+## Using the App
+
+- **Resume a Kimi session:** click `+ Agent` in the lower-left toolbar. The button opens a local session picker populated from `~/.kimi/sessions/` and `~/.kimi/kimi.json`. Selecting a session launches `kimi --work-dir <path> --session <session-id>` in Terminal.
+- **Inspect an agent:** click an agent in the office or in the right sidebar. The sidebar shows its presence, latest tool, latest subagent, and the last 20 timeline events.
+- **Read activity at a glance:** agent labels and sidebar badges use a shared presence taxonomy: `Idle`, `Work`, `Sub`, `Approval`, `Wait`, and `Error`.
+- **Track subagents:** when kimi-cli creates a subagent through the `Agent`/`Task` tool, the app creates a child character and nests its tool activity under the parent agent.
+- **Edit the office:** click `Layout` to move desks, seats, and furniture. Layout and seat assignments are saved under `~/.pixel-agents/`.
 
 ## Auto-Launch with kimi-cli
 
@@ -54,12 +62,14 @@ Runs the Express server (hot-reload via `tsx watch`) and Vite dev server concurr
 - **Server** (`server/`) — Express + WebSocket. Watches `context.jsonl` files, parses agent activity, serves the UI.
 - **Watcher** (`server/watcher.ts`) — Walks `~/.kimi/sessions/<workdir-hash>/<session-id>/`, tails parent and subagent `context.jsonl` files, and polls `state.json` titles for live agent renames.
 - **Parser** (`server/parser.ts`) — Translates kimi `role`-discriminated records and `tool_calls[]` into the same internal events the UI consumes.
-- **UI** (`webview-ui/`) — React + Canvas 2D game engine with pathfinding, sprite animation, and an office layout editor.
+- **Session launcher** (`server/index.ts`) — Lists local kimi sessions by workdir MD5 hash and resumes selected sessions with `kimi --session`.
+- **UI** (`webview-ui/`) — React + Canvas 2D game engine with pathfinding, sprite animation, an office layout editor, agent sidebar, and client-side timeline.
 
 ## Known Limitations / TODO
 
 - **Subagent pairing is heuristic.** kimi-cli stores subagent transcripts under separate paths (`subagents/<id>/context.jsonl`), so this app pairs each newly detected subagent file to the oldest unpaired parent `Agent`/`Task` tool call.
-- **Project name is the workdir-hash short id** (e.g. `a3f4b1`) unless `state.json.title` is set, since kimi hashes the workdir path with MD5. Set a session title in kimi-cli to get a friendlier label.
+- **Session picker depends on kimi's local metadata.** Workdir paths are recovered from `~/.kimi/kimi.json`; if a hash has no matching path entry, the picker still shows the session but cannot infer the original workdir.
+- **Project name is the workdir-hash short id** (e.g. `a3f4b1`) unless `state.json.title` or `state.json.custom_title` is set, since kimi hashes the workdir path with MD5. Set a session title in kimi-cli to get a friendlier label.
 - **No `turn_duration` signal.** Idle is inferred from silence — works in practice but reacts a few seconds slower than the Claude version.
 
 ## Office Tileset

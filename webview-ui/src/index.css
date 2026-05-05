@@ -48,8 +48,12 @@
   --vscode-charts-blue: #3794ff;
 
   /* Status dot colors */
+  --pixel-status-idle: rgba(255, 255, 255, 0.45);
   --pixel-status-permission: var(--vscode-charts-yellow, #cca700);
   --pixel-status-active: var(--vscode-charts-blue, #3794ff);
+  --pixel-status-subagent: var(--vscode-charts-purple, #b180d7);
+  --pixel-status-waiting: var(--vscode-charts-orange, #d18616);
+  --pixel-status-error: var(--vscode-errorForeground, #f48771);
 
   /* ToolOverlay z-index layers */
   --pixel-overlay-z: 100;

@@ -1,15 +1,15 @@
 import { useState, useEffect, useRef } from 'react'
 import { SettingsModal } from './SettingsModal.js'
-import type { WorkspaceFolder } from '../hooks/useExtensionMessages.js'
-import { vscode } from '../vscodeApi.js'
+import type { KimiSessionSummary } from '../hooks/useExtensionMessages.js'
 
 interface BottomToolbarProps {
   isEditMode: boolean
-  onOpenClaude: () => void
   onToggleEditMode: () => void
   isDebugMode: boolean
   onToggleDebugMode: () => void
-  workspaceFolders: WorkspaceFolder[]
+  kimiSessions: KimiSessionSummary[]
+  onRefreshKimiSessions: () => void
+  onResumeKimiSession: (session: KimiSessionSummary) => void
 }
 
 const panelStyle: React.CSSProperties = {
@@ -46,48 +46,54 @@ const btnActive: React.CSSProperties = {
 
 export function BottomToolbar({
   isEditMode,
-  onOpenClaude,
   onToggleEditMode,
   isDebugMode,
   onToggleDebugMode,
-  workspaceFolders,
+  kimiSessions,
+  onRefreshKimiSessions,
+  onResumeKimiSession,
 }: BottomToolbarProps) {
   const [hovered, setHovered] = useState<string | null>(null)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
-  const [isFolderPickerOpen, setIsFolderPickerOpen] = useState(false)
-  const [hoveredFolder, setHoveredFolder] = useState<number | null>(null)
-  const folderPickerRef = useRef<HTMLDivElement>(null)
+  const [isSessionPickerOpen, setIsSessionPickerOpen] = useState(false)
+  const [hoveredSession, setHoveredSession] = useState<string | null>(null)
+  const sessionPickerRef = useRef<HTMLDivElement>(null)
 
-  // Close folder picker on outside click
+  // Close session picker on outside click
   useEffect(() => {
-    if (!isFolderPickerOpen) return
+    if (!isSessionPickerOpen) return
     const handleClick = (e: MouseEvent) => {
-      if (folderPickerRef.current && !folderPickerRef.current.contains(e.target as Node)) {
-        setIsFolderPickerOpen(false)
+      if (sessionPickerRef.current && !sessionPickerRef.current.contains(e.target as Node)) {
+        setIsSessionPickerOpen(false)
       }
     }
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
-  }, [isFolderPickerOpen])
-
-  const hasMultipleFolders = workspaceFolders.length > 1
+  }, [isSessionPickerOpen])
 
   const handleAgentClick = () => {
-    if (hasMultipleFolders) {
-      setIsFolderPickerOpen((v) => !v)
-    } else {
-      onOpenClaude()
-    }
+    onRefreshKimiSessions()
+    setIsSessionPickerOpen((v) => !v)
   }
 
-  const handleFolderSelect = (folder: WorkspaceFolder) => {
-    setIsFolderPickerOpen(false)
-    vscode.postMessage({ type: 'openClaude', folderPath: folder.path })
+  const handleSessionSelect = (session: KimiSessionSummary) => {
+    setIsSessionPickerOpen(false)
+    onResumeKimiSession(session)
+  }
+
+  const formatTime = (timestamp: number) => {
+    if (!timestamp) return ''
+    return new Date(timestamp).toLocaleString([], {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
   }
 
   return (
     <div style={panelStyle}>
-      <div ref={folderPickerRef} style={{ position: 'relative' }}>
+      <div ref={sessionPickerRef} style={{ position: 'relative' }}>
         <button
           onClick={handleAgentClick}
           onMouseEnter={() => setHovered('agent')}
@@ -96,7 +102,7 @@ export function BottomToolbar({
             ...btnBase,
             padding: '5px 12px',
             background:
-              hovered === 'agent' || isFolderPickerOpen
+              hovered === 'agent' || isSessionPickerOpen
                 ? 'var(--pixel-agent-hover-bg)'
                 : 'var(--pixel-agent-bg)',
             border: '2px solid var(--pixel-agent-border)',
@@ -105,7 +111,7 @@ export function BottomToolbar({
         >
           + Agent
         </button>
-        {isFolderPickerOpen && (
+        {isSessionPickerOpen && (
           <div
             style={{
               position: 'absolute',
@@ -116,31 +122,72 @@ export function BottomToolbar({
               border: '2px solid var(--pixel-border)',
               borderRadius: 0,
               boxShadow: 'var(--pixel-shadow)',
-              minWidth: 160,
+              width: 330,
+              maxHeight: 360,
+              overflow: 'auto',
               zIndex: 'var(--pixel-controls-z)',
             }}
           >
-            {workspaceFolders.map((folder, i) => (
-              <button
-                key={folder.path}
-                onClick={() => handleFolderSelect(folder)}
-                onMouseEnter={() => setHoveredFolder(i)}
-                onMouseLeave={() => setHoveredFolder(null)}
+            {kimiSessions.length === 0 ? (
+              <div
                 style={{
-                  display: 'block',
+                  padding: '8px 10px',
+                  fontSize: '22px',
+                  color: 'var(--pixel-text-dim)',
+                }}
+              >
+                No Kimi sessions
+              </div>
+            ) : kimiSessions.map((session) => (
+              <button
+                key={`${session.workdirHash}:${session.sessionId}`}
+                onClick={() => handleSessionSelect(session)}
+                onMouseEnter={() => setHoveredSession(session.sessionId)}
+                onMouseLeave={() => setHoveredSession(null)}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr auto',
+                  gap: 6,
                   width: '100%',
                   textAlign: 'left',
-                  padding: '6px 10px',
-                  fontSize: '22px',
+                  padding: '7px 10px',
+                  fontSize: '20px',
                   color: 'var(--pixel-text)',
-                  background: hoveredFolder === i ? 'var(--pixel-btn-hover-bg)' : 'transparent',
+                  background: hoveredSession === session.sessionId ? 'var(--pixel-btn-hover-bg)' : 'transparent',
                   border: 'none',
                   borderRadius: 0,
                   cursor: 'pointer',
-                  whiteSpace: 'nowrap',
+                  minWidth: 0,
                 }}
               >
-                {folder.name}
+                <span style={{ minWidth: 0 }}>
+                  <span
+                    style={{
+                      display: 'block',
+                      color: 'var(--vscode-foreground)',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {session.title}
+                  </span>
+                  <span
+                    style={{
+                      display: 'block',
+                      color: 'var(--pixel-text-dim)',
+                      fontSize: '16px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {session.workdirPath || session.workdirHash}
+                  </span>
+                </span>
+                <span style={{ color: session.active ? 'var(--pixel-status-active)' : 'var(--pixel-text-dim)', fontSize: '16px', whiteSpace: 'nowrap' }}>
+                  {session.active ? 'Active' : formatTime(session.updatedAt)}
+                </span>
               </button>
             ))}
           </div>

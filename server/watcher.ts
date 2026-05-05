@@ -35,8 +35,8 @@ function readState(sessionDir: string): { title?: string; mtime?: number } {
     const statePath = join(sessionDir, "state.json");
     if (!existsSync(statePath)) return {};
     const stat = statSync(statePath);
-    const state = JSON.parse(readFileSync(statePath, "utf-8")) as { title?: string };
-    return { title: state.title, mtime: stat.mtimeMs };
+    const state = JSON.parse(readFileSync(statePath, "utf-8")) as { title?: string; custom_title?: string };
+    return { title: state.title || state.custom_title, mtime: stat.mtimeMs };
   } catch {
     return {};
   }

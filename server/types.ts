@@ -1,6 +1,15 @@
 // Agent activity states
 export type AgentActivity = "idle" | "typing" | "reading" | "waiting" | "permission";
 
+export interface KimiSessionSummary {
+  sessionId: string;
+  workdirHash: string;
+  workdirPath?: string;
+  title: string;
+  updatedAt: number;
+  active: boolean;
+}
+
 // Tool info for speech bubbles
 export interface ActiveTool {
   toolId: string;
@@ -52,11 +61,17 @@ export type ServerMessage =
   | { type: "wallTilesLoaded"; sprites: unknown[] }
   | { type: "furnitureAssetsLoaded"; catalog: unknown[]; sprites: Record<string, unknown> }
   | { type: "layoutLoaded"; layout: unknown; version: number }
+  | { type: "kimiSessions"; sessions: KimiSessionSummary[] }
   | { type: "settingsLoaded"; soundEnabled: boolean };
 
 // Messages sent from client to server
 export type ClientMessage =
   | { type: "ready" }
   | { type: "webviewReady" }
+  | { type: "openClaude"; folderPath?: string }
+  | { type: "openKimi"; folderPath?: string }
+  | { type: "listKimiSessions" }
+  | { type: "resumeKimiSession"; sessionId: string; workdirPath?: string }
+  | { type: "focusAgent"; id: number }
   | { type: "saveLayout"; layout: unknown }
   | { type: "saveAgentSeats"; seats: Record<number, { palette: number; hueShift: number; seatId: string | null }> };

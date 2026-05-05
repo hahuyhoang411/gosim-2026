@@ -1,12 +1,13 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import type { OfficeState } from '../office/engine/officeState.js'
-import type { OfficeLayout, ToolActivity } from '../office/types.js'
+import type { AgentPresence, AgentTimelineEvent, AgentTimelineEventType, OfficeLayout, ToolActivity } from '../office/types.js'
 import { extractToolName } from '../office/toolUtils.js'
 import { migrateLayoutColors } from '../office/layout/layoutSerializer.js'
 import { buildDynamicCatalog } from '../office/layout/furnitureCatalog.js'
 import { setFloorSprites } from '../office/floorTiles.js'
 import { setWallSprites } from '../office/wallTiles.js'
 import { setCharacterTemplates } from '../office/sprites/spriteData.js'
+import { deriveAgentPresence } from '../office/presence.js'
 import { vscode } from '../vscodeApi.js'
 import { playDoneSound, setSoundEnabled } from '../notificationSound.js'
 
@@ -40,16 +41,38 @@ export interface WorkspaceFolder {
   path: string
 }
 
+export interface KimiSessionSummary {
+  sessionId: string
+  workdirHash: string
+  workdirPath?: string
+  title: string
+  updatedAt: number
+  active: boolean
+}
+
 export interface ExtensionMessageState {
   agents: number[]
   selectedAgent: number | null
   agentTools: Record<number, ToolActivity[]>
   agentStatuses: Record<number, string>
+  agentPresences: Record<number, AgentPresence>
   subagentTools: Record<number, Record<string, ToolActivity[]>>
   subagentCharacters: SubagentCharacter[]
+  eventLog: AgentTimelineEvent[]
   layoutReady: boolean
   loadedAssets?: { catalog: FurnitureAsset[]; sprites: Record<string, string[][]> }
   workspaceFolders: WorkspaceFolder[]
+  kimiSessions: KimiSessionSummary[]
+  setSelectedAgent: (id: number | null) => void
+}
+
+const MAX_TIMELINE_EVENTS = 200
+
+function compactText(text: string | undefined, maxLen = 120): string | undefined {
+  if (!text) return undefined
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxLen) return normalized
+  return `${normalized.slice(0, maxLen - 3)}...`
 }
 
 function saveAgentSeats(os: OfficeState): void {
@@ -72,12 +95,47 @@ export function useExtensionMessages(
   const [agentStatuses, setAgentStatuses] = useState<Record<number, string>>({})
   const [subagentTools, setSubagentTools] = useState<Record<number, Record<string, ToolActivity[]>>>({})
   const [subagentCharacters, setSubagentCharacters] = useState<SubagentCharacter[]>([])
+  const [eventLog, setEventLog] = useState<AgentTimelineEvent[]>([])
   const [layoutReady, setLayoutReady] = useState(false)
   const [loadedAssets, setLoadedAssets] = useState<{ catalog: FurnitureAsset[]; sprites: Record<string, string[][]> } | undefined>()
   const [workspaceFolders, setWorkspaceFolders] = useState<WorkspaceFolder[]>([])
+  const [kimiSessions, setKimiSessions] = useState<KimiSessionSummary[]>([])
 
   // Track whether initial layout has been loaded (ref to avoid re-render)
   const layoutReadyRef = useRef(false)
+  const eventSeqRef = useRef(0)
+  const agentToolsRef = useRef(agentTools)
+  const agentStatusesRef = useRef(agentStatuses)
+  const subagentToolsRef = useRef(subagentTools)
+
+  useEffect(() => {
+    agentToolsRef.current = agentTools
+  }, [agentTools])
+
+  useEffect(() => {
+    agentStatusesRef.current = agentStatuses
+  }, [agentStatuses])
+
+  useEffect(() => {
+    subagentToolsRef.current = subagentTools
+  }, [subagentTools])
+
+  const agentPresences = useMemo(() => {
+    const next: Record<number, AgentPresence> = {}
+    for (const id of agents) {
+      next[id] = deriveAgentPresence(id, agentTools, agentStatuses, subagentTools)
+    }
+    return next
+  }, [agents, agentTools, agentStatuses, subagentTools])
+
+  const appendEvent = (
+    event: Omit<AgentTimelineEvent, 'eventId' | 'timestamp'> & { type: AgentTimelineEventType },
+  ) => {
+    const timestamp = Date.now()
+    const eventId = `${timestamp}-${eventSeqRef.current++}`
+    const nextEvent: AgentTimelineEvent = { ...event, eventId, timestamp }
+    setEventLog((prev) => [nextEvent, ...prev].slice(0, MAX_TIMELINE_EVENTS))
+  }
 
   useEffect(() => {
     // Buffer agents from existingAgents until layout is loaded
@@ -118,6 +176,13 @@ export function useExtensionMessages(
         setAgents((prev) => (prev.includes(id) ? prev : [...prev, id]))
         setSelectedAgent(id)
         os.addAgent(id, undefined, undefined, undefined, undefined, folderName)
+        appendEvent({
+          type: 'agentCreated',
+          agentId: id,
+          title: 'Agent created',
+          detail: folderName,
+          presence: 'idle',
+        })
         saveAgentSeats(os)
       } else if (msg.type === 'agentRenamed') {
         const id = msg.id as number
@@ -125,9 +190,22 @@ export function useExtensionMessages(
         if (typeof folderName === 'string') {
           const ch = os.characters.get(id)
           if (ch) ch.folderName = folderName
+          appendEvent({
+            type: 'agentRenamed',
+            agentId: id,
+            title: 'Agent renamed',
+            detail: folderName,
+            presence: deriveAgentPresence(id, agentToolsRef.current, agentStatusesRef.current, subagentToolsRef.current),
+          })
         }
       } else if (msg.type === 'agentClosed') {
         const id = msg.id as number
+        appendEvent({
+          type: 'agentClosed',
+          agentId: id,
+          title: 'Agent closed',
+          presence: 'idle',
+        })
         setAgents((prev) => prev.filter((a) => a !== id))
         setSelectedAgent((prev) => (prev === id ? null : prev))
         setAgentTools((prev) => {
@@ -175,17 +253,26 @@ export function useExtensionMessages(
         const id = msg.id as number
         const toolId = msg.toolId as string
         const status = msg.status as string
+        const isSubtask = status.startsWith('Subtask:')
         setAgentTools((prev) => {
           const list = prev[id] || []
           if (list.some((t) => t.toolId === toolId)) return prev
           return { ...prev, [id]: [...list, { toolId, status, done: false }] }
+        })
+        appendEvent({
+          type: 'agentToolStart',
+          agentId: id,
+          title: isSubtask ? 'Subagent started' : 'Tool started',
+          detail: compactText(status),
+          toolId,
+          presence: isSubtask ? 'subagent' : 'active',
         })
         const toolName = extractToolName(status)
         os.setAgentTool(id, toolName)
         os.setAgentActive(id, true)
         os.clearPermissionBubble(id)
         // Create sub-agent character for Task tool subtasks
-        if (status.startsWith('Subtask:')) {
+        if (isSubtask) {
           const label = status.slice('Subtask:'.length).trim()
           const subId = os.addSubagent(id, toolId)
           setSubagentCharacters((prev) => {
@@ -196,6 +283,7 @@ export function useExtensionMessages(
       } else if (msg.type === 'agentToolDone') {
         const id = msg.id as number
         const toolId = msg.toolId as string
+        const tool = (agentToolsRef.current[id] || []).find((t) => t.toolId === toolId)
         setAgentTools((prev) => {
           const list = prev[id]
           if (!list) return prev
@@ -203,6 +291,14 @@ export function useExtensionMessages(
             ...prev,
             [id]: list.map((t) => (t.toolId === toolId ? { ...t, done: true } : t)),
           }
+        })
+        appendEvent({
+          type: 'agentToolDone',
+          agentId: id,
+          title: 'Tool done',
+          detail: compactText(tool?.status || toolId),
+          toolId,
+          presence: deriveAgentPresence(id, agentToolsRef.current, agentStatusesRef.current, subagentToolsRef.current),
         })
       } else if (msg.type === 'agentToolsClear') {
         const id = msg.id as number
@@ -229,6 +325,13 @@ export function useExtensionMessages(
       } else if (msg.type === 'agentStatus') {
         const id = msg.id as number
         const status = msg.status as string
+        appendEvent({
+          type: 'agentStatus',
+          agentId: id,
+          title: status === 'waiting' ? 'Agent waiting' : 'Agent active',
+          detail: status,
+          presence: status === 'waiting' ? 'waiting' : 'active',
+        })
         setAgentStatuses((prev) => {
           if (status === 'active') {
             if (!(id in prev)) return prev
@@ -245,6 +348,13 @@ export function useExtensionMessages(
         }
       } else if (msg.type === 'agentToolPermission') {
         const id = msg.id as number
+        appendEvent({
+          type: 'agentToolPermission',
+          agentId: id,
+          title: 'Needs approval',
+          detail: 'Parent tool is waiting for permission',
+          presence: 'permission',
+        })
         setAgentTools((prev) => {
           const list = prev[id]
           if (!list) return prev
@@ -257,6 +367,26 @@ export function useExtensionMessages(
       } else if (msg.type === 'subagentToolPermission') {
         const id = msg.id as number
         const parentToolId = msg.parentToolId as string
+        appendEvent({
+          type: 'subagentToolPermission',
+          agentId: id,
+          title: 'Subagent needs approval',
+          detail: parentToolId,
+          parentToolId,
+          presence: 'permission',
+        })
+        setSubagentTools((prev) => {
+          const agentSubs = prev[id]
+          const list = agentSubs?.[parentToolId]
+          if (!agentSubs || !list) return prev
+          return {
+            ...prev,
+            [id]: {
+              ...agentSubs,
+              [parentToolId]: list.map((tool) => (tool.done ? tool : { ...tool, permissionWait: true })),
+            },
+          }
+        })
         // Show permission bubble on the sub-agent character
         const subId = os.getSubagentId(id, parentToolId)
         if (subId !== null) {
@@ -264,6 +394,12 @@ export function useExtensionMessages(
         }
       } else if (msg.type === 'agentToolPermissionClear') {
         const id = msg.id as number
+        appendEvent({
+          type: 'agentToolPermissionClear',
+          agentId: id,
+          title: 'Approval cleared',
+          presence: deriveAgentPresence(id, agentToolsRef.current, agentStatusesRef.current, subagentToolsRef.current),
+        })
         setAgentTools((prev) => {
           const list = prev[id]
           if (!list) return prev
@@ -281,11 +417,34 @@ export function useExtensionMessages(
             os.clearPermissionBubble(subId)
           }
         }
+        setSubagentTools((prev) => {
+          const agentSubs = prev[id]
+          if (!agentSubs) return prev
+          let changed = false
+          const nextSubs: Record<string, ToolActivity[]> = {}
+          for (const [parentToolId, list] of Object.entries(agentSubs)) {
+            nextSubs[parentToolId] = list.map((tool) => {
+              if (!tool.permissionWait) return tool
+              changed = true
+              return { ...tool, permissionWait: false }
+            })
+          }
+          return changed ? { ...prev, [id]: nextSubs } : prev
+        })
       } else if (msg.type === 'subagentToolStart') {
         const id = msg.id as number
         const parentToolId = msg.parentToolId as string
         const toolId = msg.toolId as string
         const status = msg.status as string
+        appendEvent({
+          type: 'subagentToolStart',
+          agentId: id,
+          title: 'Subagent tool started',
+          detail: compactText(status),
+          parentToolId,
+          toolId,
+          presence: 'subagent',
+        })
         setSubagentTools((prev) => {
           const agentSubs = prev[id] || {}
           const list = agentSubs[parentToolId] || []
@@ -303,6 +462,17 @@ export function useExtensionMessages(
         const id = msg.id as number
         const parentToolId = msg.parentToolId as string
         const toolId = msg.toolId as string
+        const tool = subagentToolsRef.current[id]?.[parentToolId]?.find((t) => t.toolId === toolId)
+        const remainingActive = (subagentToolsRef.current[id]?.[parentToolId] || []).some((t) => t.toolId !== toolId && !t.done)
+        appendEvent({
+          type: 'subagentToolDone',
+          agentId: id,
+          title: 'Subagent tool done',
+          detail: compactText(tool?.status || toolId),
+          parentToolId,
+          toolId,
+          presence: deriveAgentPresence(id, agentToolsRef.current, agentStatusesRef.current, subagentToolsRef.current),
+        })
         setSubagentTools((prev) => {
           const agentSubs = prev[id]
           if (!agentSubs) return prev
@@ -313,6 +483,14 @@ export function useExtensionMessages(
             [id]: { ...agentSubs, [parentToolId]: list.map((t) => (t.toolId === toolId ? { ...t, done: true } : t)) },
           }
         })
+        if (!remainingActive) {
+          const subId = os.getSubagentId(id, parentToolId)
+          if (subId !== null) {
+            os.setAgentActive(subId, false)
+            os.setAgentTool(subId, null)
+            os.clearPermissionBubble(subId)
+          }
+        }
       } else if (msg.type === 'subagentClear') {
         const id = msg.id as number
         const parentToolId = msg.parentToolId as string
@@ -346,6 +524,8 @@ export function useExtensionMessages(
       } else if (msg.type === 'workspaceFolders') {
         const folders = msg.folders as WorkspaceFolder[]
         setWorkspaceFolders(folders)
+      } else if (msg.type === 'kimiSessions') {
+        setKimiSessions((msg.sessions || []) as KimiSessionSummary[])
       } else if (msg.type === 'settingsLoaded') {
         const soundOn = msg.soundEnabled as boolean
         setSoundEnabled(soundOn)
@@ -367,5 +547,19 @@ export function useExtensionMessages(
     return () => window.removeEventListener('message', handler)
   }, [getOfficeState])
 
-  return { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, workspaceFolders }
+  return {
+    agents,
+    selectedAgent,
+    agentTools,
+    agentStatuses,
+    agentPresences,
+    subagentTools,
+    subagentCharacters,
+    eventLog,
+    layoutReady,
+    loadedAssets,
+    workspaceFolders,
+    kimiSessions,
+    setSelectedAgent,
+  }
 }

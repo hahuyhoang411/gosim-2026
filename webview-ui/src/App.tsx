@@ -14,6 +14,7 @@ import { useEditorKeyboard } from './hooks/useEditorKeyboard.js'
 import { ZoomControls } from './components/ZoomControls.js'
 import { BottomToolbar } from './components/BottomToolbar.js'
 import { DebugView } from './components/DebugView.js'
+import { AgentSidebar } from './components/AgentSidebar.js'
 
 // Game state lives outside React — updated imperatively by message handlers
 const officeStateRef = { current: null as OfficeState | null }
@@ -121,15 +122,46 @@ function App() {
 
   const isEditDirty = useCallback(() => editor.isEditMode && editor.isDirty, [editor.isEditMode, editor.isDirty])
 
-  const { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, workspaceFolders } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
+  const {
+    agents,
+    selectedAgent,
+    agentTools,
+    agentStatuses,
+    agentPresences,
+    subagentTools,
+    subagentCharacters,
+    eventLog,
+    layoutReady,
+    loadedAssets,
+    kimiSessions,
+    setSelectedAgent,
+  } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
 
   const [isDebugMode, setIsDebugMode] = useState(false)
 
   const handleToggleDebugMode = useCallback(() => setIsDebugMode((prev) => !prev), [])
 
-  const handleSelectAgent = useCallback((id: number) => {
-    vscode.postMessage({ type: 'focusAgent', id })
+  const handleRefreshKimiSessions = useCallback(() => {
+    vscode.postMessage({ type: 'listKimiSessions' })
   }, [])
+
+  const handleResumeKimiSession = useCallback((session: { sessionId: string; workdirPath?: string }) => {
+    vscode.postMessage({
+      type: 'resumeKimiSession',
+      sessionId: session.sessionId,
+      workdirPath: session.workdirPath,
+    })
+  }, [])
+
+  const handleSelectAgent = useCallback((id: number) => {
+    const os = getOfficeState()
+    os.selectedAgentId = id
+    os.cameraFollowId = id
+    setSelectedAgent(id)
+    const meta = os.subagentMeta.get(id)
+    const focusId = meta ? meta.parentAgentId : id
+    vscode.postMessage({ type: 'focusAgent', id: focusId })
+  }, [setSelectedAgent])
 
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -147,16 +179,23 @@ function App() {
   )
 
   const handleCloseAgent = useCallback((id: number) => {
+    const os = getOfficeState()
+    if (os.selectedAgentId === id) {
+      os.selectedAgentId = null
+      os.cameraFollowId = null
+      setSelectedAgent(null)
+    }
     vscode.postMessage({ type: 'closeAgent', id })
-  }, [])
+  }, [setSelectedAgent])
 
   const handleClick = useCallback((agentId: number) => {
     // If clicked agent is a sub-agent, focus the parent's terminal instead
     const os = getOfficeState()
+    setSelectedAgent(os.selectedAgentId)
     const meta = os.subagentMeta.get(agentId)
     const focusId = meta ? meta.parentAgentId : agentId
     vscode.postMessage({ type: 'focusAgent', id: focusId })
-  }, [])
+  }, [setSelectedAgent])
 
   const officeState = getOfficeState()
 
@@ -225,11 +264,12 @@ function App() {
 
       <BottomToolbar
         isEditMode={editor.isEditMode}
-        onOpenClaude={editor.handleOpenClaude}
         onToggleEditMode={editor.handleToggleEditMode}
         isDebugMode={isDebugMode}
         onToggleDebugMode={handleToggleDebugMode}
-        workspaceFolders={workspaceFolders}
+        kimiSessions={kimiSessions}
+        onRefreshKimiSessions={handleRefreshKimiSessions}
+        onResumeKimiSession={handleResumeKimiSession}
       />
 
       {editor.isEditMode && editor.isDirty && (
@@ -289,12 +329,29 @@ function App() {
         officeState={officeState}
         agents={agents}
         agentTools={agentTools}
+        agentPresences={agentPresences}
         subagentCharacters={subagentCharacters}
         containerRef={containerRef}
         zoom={editor.zoom}
         panRef={editor.panRef}
         onCloseAgent={handleCloseAgent}
       />
+
+      {!isDebugMode && (
+        <AgentSidebar
+          officeState={officeState}
+          agents={agents}
+          selectedAgent={selectedAgent}
+          agentTools={agentTools}
+          agentStatuses={agentStatuses}
+          agentPresences={agentPresences}
+          subagentTools={subagentTools}
+          subagentCharacters={subagentCharacters}
+          eventLog={eventLog}
+          onSelectAgent={handleSelectAgent}
+          onCloseAgent={handleCloseAgent}
+        />
+      )}
 
       {isDebugMode && (
         <DebugView
