@@ -39,6 +39,27 @@ export interface TrackedAgent {
   pendingAgentToolIds: string[];
 }
 
+export type AgentChatRole = "user" | "assistant" | "thinking" | "system" | "tool";
+export type AgentTurnState = "idle" | "running" | "waiting_for_approval" | "waiting_for_answer" | "cancelled" | "error";
+export type AgentProcessState = "starting" | "ready" | "exited" | "crashed";
+export type AgentBubbleKind = "user" | "assistant" | "system" | "steer" | "error";
+
+export interface AgentChatEntry {
+  id: string;
+  agentId: number;
+  role: AgentChatRole;
+  text: string;
+  createdAt: number;
+  source?: "prompt" | "steer" | "wire" | "system" | "request";
+  turnId?: string;
+}
+
+export interface AgentRequestMessage {
+  requestId: string;
+  requestType: "ApprovalRequest" | "QuestionRequest" | "ToolCallRequest" | "HookRequest" | string;
+  payload: Record<string, unknown>;
+}
+
 // Messages sent from server to client via WebSocket
 // Must match the upstream message format expected by useExtensionMessages
 export type ServerMessage =
@@ -50,6 +71,12 @@ export type ServerMessage =
   | { type: "agentToolDone"; id: number; toolId: string }
   | { type: "agentToolsClear"; id: number }
   | { type: "agentStatus"; id: number; status: string }
+  | { type: "agentChatEntry"; agentId: number; entry: AgentChatEntry }
+  | { type: "agentBubble"; agentId: number; text: string; kind: AgentBubbleKind; ttlMs?: number }
+  | { type: "agentTurnState"; agentId: number; turnState: AgentTurnState }
+  | { type: "agentProcessState"; agentId: number; state: AgentProcessState; pid?: number; error?: string }
+  | { type: "agentRequest"; agentId: number; request: AgentRequestMessage }
+  | { type: "agentRequestResolved"; agentId: number; requestId: string }
   | { type: "agentToolPermission"; id: number }
   | { type: "agentToolPermissionClear"; id: number }
   | { type: "subagentToolStart"; id: number; parentToolId: string; toolId: string; status: string }
@@ -70,6 +97,12 @@ export type ClientMessage =
   | { type: "webviewReady" }
   | { type: "openClaude"; folderPath?: string }
   | { type: "openKimi"; folderPath?: string }
+  | { type: "spawnKimiAgent"; workdirPath?: string; prompt?: string; planMode?: boolean; yolo?: boolean }
+  | { type: "sendAgentMessage"; agentId: number; text: string }
+  | { type: "cancelAgentTurn"; agentId: number }
+  | { type: "respondApproval"; agentId: number; requestId: string; response: "approve" | "approve_for_session" | "reject"; feedback?: string }
+  | { type: "respondQuestion"; agentId: number; requestId: string; answers: Record<string, string> }
+  | { type: "closeAgent"; id: number }
   | { type: "listKimiSessions" }
   | { type: "resumeKimiSession"; sessionId: string; workdirPath?: string }
   | { type: "focusAgent"; id: number }

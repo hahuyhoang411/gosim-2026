@@ -85,6 +85,10 @@ export type AgentPresence = 'idle' | 'active' | 'subagent' | 'permission' | 'wai
 
 export type AgentTimelineEventType =
   | 'agentStatus'
+  | 'agentChatEntry'
+  | 'agentTurnState'
+  | 'agentProcessState'
+  | 'agentRequest'
   | 'agentToolStart'
   | 'agentToolDone'
   | 'agentToolPermission'
@@ -205,8 +209,12 @@ export interface Character {
   /** Assigned seat uid, or null if no seat */
   seatId: string | null
   /** Active speech bubble type, or null if none showing */
-  bubbleType: 'permission' | 'waiting' | null
-  /** Countdown timer for bubble (waiting: 2→0, permission: unused) */
+  bubbleType: 'permission' | 'waiting' | 'text' | null
+  /** Text displayed in text bubbles. */
+  bubbleText?: string
+  /** Visual style for text bubbles. */
+  bubbleKind?: 'user' | 'assistant' | 'system' | 'steer' | 'error'
+  /** Countdown timer for bubble (waiting/text: n→0, permission: unused) */
   bubbleTimer: number
   /** Timer to stay seated while inactive after seat reassignment (counts down to 0) */
   seatTimer: number
