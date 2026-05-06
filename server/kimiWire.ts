@@ -263,7 +263,9 @@ export function requestDisplayText(params: WireRequestParams): string {
   if (params.type === "QuestionRequest") {
     const questions = Array.isArray(payload.questions) ? payload.questions : [];
     const first = asRecord(questions[0]);
-    return oneLine(first.question ?? "Question from Kimi", 180) || "Question from Kimi";
+    const header = typeof first.header === "string" && first.header.trim() ? `${first.header.trim()}: ` : "";
+    const more = questions.length > 1 ? ` (+${questions.length - 1} more)` : "";
+    return oneLine(`${header}${typeof first.question === "string" ? first.question : "Question from Kimi"}${more}`, 180) || "Question from Kimi";
   }
   if (params.type === "ToolCallRequest") {
     return `External tool request: ${typeof payload.name === "string" ? payload.name : "unknown"}`;

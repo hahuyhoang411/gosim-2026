@@ -596,7 +596,8 @@ function respondToWireApproval(
     request_id: msg.requestId,
     response: msg.response,
   };
-  if (msg.feedback) result.feedback = msg.feedback;
+  const feedback = typeof msg.feedback === "string" ? msg.feedback.trim() : "";
+  if (feedback) result.feedback = feedback;
   ui.wire.respond(pending.rpcId, result);
   ui.pendingRequests.delete(msg.requestId);
   broadcast({ type: "agentRequestResolved", agentId: ui.agent.id, requestId: msg.requestId });
