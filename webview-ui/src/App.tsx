@@ -13,8 +13,11 @@ import { useEditorActions } from './hooks/useEditorActions.js'
 import { useEditorKeyboard } from './hooks/useEditorKeyboard.js'
 import { ZoomControls } from './components/ZoomControls.js'
 import { BottomToolbar } from './components/BottomToolbar.js'
+import type { SpawnKimiAgentInput } from './components/AgentSpawnDialog.js'
 import { DebugView } from './components/DebugView.js'
 import { AgentSidebar } from './components/AgentSidebar.js'
+import { BlackboardPanel } from './components/BlackboardPanel.js'
+import { RoomLabelsOverlay } from './components/RoomLabelsOverlay.js'
 
 // Game state lives outside React — updated imperatively by message handlers
 const officeStateRef = { current: null as OfficeState | null }
@@ -128,6 +131,12 @@ function App() {
     agentTools,
     agentStatuses,
     agentPresences,
+    agentChats,
+    agentTurnStates,
+    agentProcessStates,
+    agentRequests,
+    agentTodoLists,
+    agentRooms,
     subagentTools,
     subagentCharacters,
     eventLog,
@@ -151,6 +160,36 @@ function App() {
       sessionId: session.sessionId,
       workdirPath: session.workdirPath,
     })
+  }, [])
+
+  const handleSpawnKimiAgent = useCallback((input: SpawnKimiAgentInput) => {
+    vscode.postMessage({
+      type: 'spawnKimiAgent',
+      workdirPath: input.workdirPath,
+      prompt: input.prompt,
+      planMode: input.planMode,
+    })
+  }, [])
+
+  const handleSendAgentMessage = useCallback((agentId: number, text: string) => {
+    vscode.postMessage({ type: 'sendAgentMessage', agentId, text })
+  }, [])
+
+  const handleCancelAgentTurn = useCallback((agentId: number) => {
+    vscode.postMessage({ type: 'cancelAgentTurn', agentId })
+  }, [])
+
+  const handleRespondApproval = useCallback((
+    agentId: number,
+    requestId: string,
+    response: 'approve' | 'approve_for_session' | 'reject',
+    feedback?: string,
+  ) => {
+    vscode.postMessage({ type: 'respondApproval', agentId, requestId, response, feedback })
+  }, [])
+
+  const handleRespondQuestion = useCallback((agentId: number, requestId: string, answers: Record<string, string>) => {
+    vscode.postMessage({ type: 'respondQuestion', agentId, requestId, answers })
   }, [])
 
   const handleSelectAgent = useCallback((id: number) => {
@@ -270,6 +309,7 @@ function App() {
         kimiSessions={kimiSessions}
         onRefreshKimiSessions={handleRefreshKimiSessions}
         onResumeKimiSession={handleResumeKimiSession}
+        onSpawnKimiAgent={handleSpawnKimiAgent}
       />
 
       {editor.isEditMode && editor.isDirty && (
@@ -338,6 +378,29 @@ function App() {
       />
 
       {!isDebugMode && (
+        <RoomLabelsOverlay
+          officeState={officeState}
+          containerRef={containerRef}
+          zoom={editor.zoom}
+          panRef={editor.panRef}
+        />
+      )}
+
+      {!isDebugMode && (
+        <BlackboardPanel
+          officeState={officeState}
+          agents={agents}
+          agentTodoLists={agentTodoLists}
+          agentRooms={agentRooms}
+          selectedAgent={selectedAgent}
+          containerRef={containerRef}
+          zoom={editor.zoom}
+          panRef={editor.panRef}
+          onSelectAgent={handleSelectAgent}
+        />
+      )}
+
+      {!isDebugMode && (
         <AgentSidebar
           officeState={officeState}
           agents={agents}
@@ -345,11 +408,19 @@ function App() {
           agentTools={agentTools}
           agentStatuses={agentStatuses}
           agentPresences={agentPresences}
+          agentChats={agentChats}
+          agentTurnStates={agentTurnStates}
+          agentProcessStates={agentProcessStates}
+          agentRequests={agentRequests}
           subagentTools={subagentTools}
           subagentCharacters={subagentCharacters}
           eventLog={eventLog}
           onSelectAgent={handleSelectAgent}
           onCloseAgent={handleCloseAgent}
+          onSendAgentMessage={handleSendAgentMessage}
+          onCancelAgentTurn={handleCancelAgentTurn}
+          onRespondApproval={handleRespondApproval}
+          onRespondQuestion={handleRespondQuestion}
         />
       )}
 

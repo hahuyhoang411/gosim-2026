@@ -25,6 +25,7 @@ import {
   getBlockedTiles,
 } from '../layout/layoutSerializer.js'
 import { getCatalogEntry, getOnStateType } from '../layout/furnitureCatalog.js'
+import { chooseSeatForRoom, type AgentRoomKind } from '../roomRouting.js'
 
 export class OfficeState {
   layout: OfficeLayout
@@ -153,10 +154,24 @@ export class OfficeState {
   /** Temporarily unblock a character's own seat, run fn, then re-block */
   private withOwnSeatUnblocked<T>(ch: Character, fn: () => T): T {
     const key = this.ownSeatKey(ch)
-    if (key) this.blockedTiles.delete(key)
-    const result = fn()
-    if (key) this.blockedTiles.add(key)
-    return result
+    return this.withTilesUnblocked(key ? [key] : [], fn)
+  }
+
+  /** Temporarily unblock furniture-occupied tiles used as seats for pathfinding. */
+  private withTilesUnblocked<T>(keys: string[], fn: () => T): T {
+    const removed: string[] = []
+    for (const key of keys) {
+      if (!this.blockedTiles.has(key)) continue
+      this.blockedTiles.delete(key)
+      removed.push(key)
+    }
+    try {
+      return fn()
+    } finally {
+      for (const key of removed) {
+        this.blockedTiles.add(key)
+      }
+    }
   }
 
   private findFreeSeat(): string | null {
@@ -263,6 +278,8 @@ export class OfficeState {
     ch.matrixEffectTimer = 0
     ch.matrixEffectSeeds = matrixEffectSeeds()
     ch.bubbleType = null
+    ch.bubbleText = undefined
+    ch.bubbleKind = undefined
   }
 
   /** Find seat uid at a given tile position, or null */
@@ -277,18 +294,24 @@ export class OfficeState {
   reassignSeat(agentId: number, seatId: string): void {
     const ch = this.characters.get(agentId)
     if (!ch) return
+    const seat = this.seats.get(seatId)
+    if (!seat) return
+    if (seat.assigned && ch.seatId !== seatId) return
+    if (ch.seatId === seatId) {
+      this.sendToSeat(agentId)
+      return
+    }
+    const oldSeatKey = this.ownSeatKey(ch)
     // Unassign old seat
     if (ch.seatId) {
       const old = this.seats.get(ch.seatId)
       if (old) old.assigned = false
     }
-    // Assign new seat
-    const seat = this.seats.get(seatId)
-    if (!seat || seat.assigned) return
     seat.assigned = true
     ch.seatId = seatId
     // Pathfind to new seat (unblock own seat tile for this query)
-    const path = this.withOwnSeatUnblocked(ch, () =>
+    const targetSeatKey = `${seat.seatCol},${seat.seatRow}`
+    const path = this.withTilesUnblocked([oldSeatKey, targetSeatKey].filter((key): key is string => Boolean(key)), () =>
       findPath(ch.tileCol, ch.tileRow, seat.seatCol, seat.seatRow, this.tileMap, this.blockedTiles)
     )
     if (path.length > 0) {
@@ -307,6 +330,20 @@ export class OfficeState {
         ch.seatTimer = INACTIVE_SEAT_TIMER_MIN_SEC + Math.random() * INACTIVE_SEAT_TIMER_RANGE_SEC
       }
     }
+  }
+
+  /** Assign and move an agent to the best available seat for a semantic room. */
+  moveAgentToRoom(agentId: number, room: AgentRoomKind): boolean {
+    const ch = this.characters.get(agentId)
+    if (!ch) return false
+    const seatId = chooseSeatForRoom(room, this.seats, ch.seatId)
+    if (!seatId) return false
+    if (ch.seatId === seatId) {
+      this.sendToSeat(agentId)
+      return true
+    }
+    this.reassignSeat(agentId, seatId)
+    return ch.seatId === seatId
   }
 
   /** Send an agent back to their currently assigned seat */
@@ -446,6 +483,8 @@ export class OfficeState {
       ch.matrixEffectTimer = 0
       ch.matrixEffectSeeds = matrixEffectSeeds()
       ch.bubbleType = null
+      ch.bubbleText = undefined
+      ch.bubbleKind = undefined
     }
     // Clean up tracking maps immediately so keys don't collide
     this.subagentIdMap.delete(key)
@@ -477,6 +516,8 @@ export class OfficeState {
           ch.matrixEffectTimer = 0
           ch.matrixEffectSeeds = matrixEffectSeeds()
           ch.bubbleType = null
+          ch.bubbleText = undefined
+          ch.bubbleKind = undefined
         }
         this.subagentMeta.delete(id)
         if (this.selectedAgentId === id) this.selectedAgentId = null
@@ -580,6 +621,8 @@ export class OfficeState {
     const ch = this.characters.get(id)
     if (ch) {
       ch.bubbleType = 'permission'
+      ch.bubbleText = undefined
+      ch.bubbleKind = undefined
       ch.bubbleTimer = 0
     }
   }
@@ -588,6 +631,8 @@ export class OfficeState {
     const ch = this.characters.get(id)
     if (ch && ch.bubbleType === 'permission') {
       ch.bubbleType = null
+      ch.bubbleText = undefined
+      ch.bubbleKind = undefined
       ch.bubbleTimer = 0
     }
   }
@@ -596,18 +641,37 @@ export class OfficeState {
     const ch = this.characters.get(id)
     if (ch) {
       ch.bubbleType = 'waiting'
+      ch.bubbleText = undefined
+      ch.bubbleKind = undefined
       ch.bubbleTimer = WAITING_BUBBLE_DURATION_SEC
     }
   }
 
-  /** Dismiss bubble on click — permission: instant, waiting: quick fade */
+  showTextBubble(
+    id: number,
+    text: string,
+    kind: 'user' | 'assistant' | 'system' | 'steer' | 'error' = 'assistant',
+    durationSec = 7,
+  ): void {
+    const ch = this.characters.get(id)
+    const normalized = text.replace(/\s+/g, ' ').trim()
+    if (!ch || !normalized) return
+    ch.bubbleType = 'text'
+    ch.bubbleText = normalized
+    ch.bubbleKind = kind
+    ch.bubbleTimer = durationSec
+  }
+
+  /** Dismiss bubble on click — permission: instant, waiting/text: quick fade */
   dismissBubble(id: number): void {
     const ch = this.characters.get(id)
     if (!ch || !ch.bubbleType) return
     if (ch.bubbleType === 'permission') {
       ch.bubbleType = null
+      ch.bubbleText = undefined
+      ch.bubbleKind = undefined
       ch.bubbleTimer = 0
-    } else if (ch.bubbleType === 'waiting') {
+    } else if (ch.bubbleType === 'waiting' || ch.bubbleType === 'text') {
       // Trigger immediate fade (0.3s remaining)
       ch.bubbleTimer = Math.min(ch.bubbleTimer, DISMISS_BUBBLE_FAST_FADE_SEC)
     }
@@ -638,11 +702,13 @@ export class OfficeState {
         updateCharacter(ch, dt, this.walkableTiles, this.seats, this.tileMap, this.blockedTiles)
       )
 
-      // Tick bubble timer for waiting bubbles
-      if (ch.bubbleType === 'waiting') {
+      // Tick bubble timer for transient bubbles
+      if (ch.bubbleType === 'waiting' || ch.bubbleType === 'text') {
         ch.bubbleTimer -= dt
         if (ch.bubbleTimer <= 0) {
           ch.bubbleType = null
+          ch.bubbleText = undefined
+          ch.bubbleKind = undefined
           ch.bubbleTimer = 0
         }
       }

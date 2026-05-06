@@ -1,14 +1,40 @@
 import express from "express";
 import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
-import { join, dirname } from "path";
+import { join, dirname, basename } from "path";
 import { homedir, platform } from "os";
 import { fileURLToPath } from "url";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "fs";
 import { spawn } from "child_process";
+import { createHash } from "crypto";
 import { JsonlWatcher, type WatchedFile } from "./watcher.js";
 import { processTranscriptLine, processSubagentLine, pairSubagentToParent } from "./parser.js";
 import { listKimiSessions } from "./kimiMetadata.js";
+import {
+  appendStreamingChatText,
+  resetStreamingChat,
+  type StreamingChatState,
+} from "./agentChat.js";
+import {
+  KimiWireSession,
+  contentInputText,
+  contentPartText,
+  extractWireTodoList,
+  formatWireToolStatus,
+  requestDisplayText,
+  type WireEventParams,
+  type WireRequestEnvelope,
+} from "./kimiWire.js";
+import {
+  applyReplayWireEvent,
+  applyReplayWireRequest,
+  appendWireConversationEntry,
+  createWireConversationState,
+  registerWireRequest,
+  resolveWireRequest,
+  wireConversationSnapshot,
+  type WireConversationState,
+} from "./wireConversation.js";
 import {
   loadCharacterSprites,
   loadWallTiles,
@@ -16,7 +42,17 @@ import {
   loadFurnitureAssets,
   loadDefaultLayout,
 } from "./assetLoader.js";
-import type { TrackedAgent, ServerMessage } from "./types.js";
+import type {
+  AgentChatEntry,
+  AgentBubbleKind,
+  AgentChatRole,
+  AgentProcessState,
+  AgentTodoItem,
+  AgentTurnState,
+  ClientMessage,
+  ServerMessage,
+  TrackedAgent,
+} from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.PORT || "3456", 10);
@@ -25,9 +61,26 @@ const KIMI_EXECUTABLE = process.env.KIMI_CLI || findExecutable("kimi") || "kimi"
 
 // State
 const agents = new Map<string, TrackedAgent>(); // sessionId -> agent
+const agentKeysById = new Map<number, string>();
 let nextAgentId = 1;
+let nextChatEntryId = 1;
 const clients = new Set<WebSocket>();
 let lastActivityTime = Date.now();
+
+interface UiWireAgent {
+  key: string;
+  agent: TrackedAgent;
+  wire: KimiWireSession;
+  conversation: WireConversationState;
+  turnState: AgentTurnState;
+  processState: AgentProcessState;
+  runningPrompt: Promise<unknown> | null;
+  streamingChat: StreamingChatState;
+  isReplaying: boolean;
+  todoList: AgentTodoItem[];
+}
+
+const wireAgents = new Map<number, UiWireAgent>();
 
 function findExecutable(name: string): string | null {
   const pathDirs = (process.env.PATH || "").split(":").filter(Boolean);
@@ -53,7 +106,7 @@ function appleScriptString(value: string): string {
 }
 
 function currentKimiSessions(): ReturnType<typeof listKimiSessions> {
-  return listKimiSessions(new Set(agents.keys()), 48);
+  return listKimiSessions(new Set([...agents.keys()].filter((key) => !key.startsWith("wire:"))), 48);
 }
 
 function resolveLaunchCwd(folderPath: unknown): string {
@@ -66,6 +119,146 @@ function resolveLaunchCwd(folderPath: unknown): string {
     /* fall back below */
   }
   return process.cwd();
+}
+
+function createTrackedAgent(id: number, sessionId: string, projectDir: string, projectName: string, jsonlFile = ""): TrackedAgent {
+  return {
+    id,
+    sessionId,
+    projectDir,
+    projectName,
+    jsonlFile,
+    fileOffset: 0,
+    lineBuffer: "",
+    activity: "idle",
+    activeTools: new Map(),
+    activeToolNames: new Map(),
+    activeSubagentToolIds: new Map(),
+    activeSubagentToolNames: new Map(),
+    isWaiting: false,
+    permissionSent: false,
+    hadToolsInTurn: false,
+    lastActivityTime: Date.now(),
+    pendingAgentToolIds: [],
+  };
+}
+
+function projectNameFromPath(cwd: string): string {
+  const normalized = cwd.replace(/\/+$/, "");
+  return normalized.split("/").pop() || normalized || "Kimi Agent";
+}
+
+function workdirHash(cwd: string): string {
+  return createHash("md5").update(cwd).digest("hex");
+}
+
+function fileWorkdirHash(contextPath: string): string {
+  return basename(dirname(dirname(contextPath)));
+}
+
+function adoptWatcherFileForWireAgent(file: WatchedFile): boolean {
+  if (file.kind !== "parent") return false;
+  const hash = fileWorkdirHash(file.path);
+  const candidates = [...wireAgents.values()]
+    .filter((ui) => ui.agent.jsonlFile === "" && workdirHash(ui.agent.projectDir) === hash)
+    .sort((a, b) => b.agent.lastActivityTime - a.agent.lastActivityTime);
+  const match = candidates[0];
+  if (!match) return false;
+
+  agents.delete(match.key);
+  match.key = file.sessionId;
+  match.agent.sessionId = file.sessionId;
+  match.agent.jsonlFile = file.path;
+  match.agent.projectName = projectNameFromPath(match.agent.projectDir);
+  rememberAgent(file.sessionId, match.agent);
+  broadcast({ type: "kimiSessions", sessions: currentKimiSessions() });
+  console.log(`Agent ${match.agent.id} bound to Kimi session ${file.sessionId.slice(0, 8)}`);
+  return true;
+}
+
+function rememberAgent(key: string, agent: TrackedAgent): void {
+  agents.set(key, agent);
+  agentKeysById.set(agent.id, key);
+}
+
+function forgetAgentById(id: number): TrackedAgent | null {
+  const key = agentKeysById.get(id);
+  if (!key) return null;
+  const agent = agents.get(key) ?? null;
+  agents.delete(key);
+  agentKeysById.delete(id);
+  return agent;
+}
+
+function setWireTurnState(ui: UiWireAgent, turnState: AgentTurnState): void {
+  ui.turnState = turnState;
+  broadcast({ type: "agentTurnState", agentId: ui.agent.id, turnState });
+}
+
+function setWireProcessState(ui: UiWireAgent, state: AgentProcessState, error?: string): void {
+  ui.processState = state;
+  broadcast({ type: "agentProcessState", agentId: ui.agent.id, state, pid: ui.wire.pid, error });
+}
+
+function createWireChatEntry(
+  ui: UiWireAgent,
+  role: AgentChatRole,
+  text: string,
+  source: AgentChatEntry["source"] = "wire",
+): AgentChatEntry {
+  const now = Date.now();
+  return {
+    id: `${now}-${nextChatEntryId++}`,
+    agentId: ui.agent.id,
+    role,
+    text,
+    createdAt: now,
+    source,
+  };
+}
+
+function appendWireChat(
+  ui: UiWireAgent,
+  role: AgentChatRole,
+  text: string,
+  source: AgentChatEntry["source"] = "wire",
+): AgentChatEntry | null {
+  resetStreamingChat(ui.streamingChat);
+  const now = Date.now();
+  const entry = appendWireConversationEntry(ui.conversation, role, text, source, {
+    id: `${now}-${nextChatEntryId++}`,
+    createdAt: now,
+  });
+  if (!entry) return null;
+  broadcast({ type: "agentChatEntry", agentId: ui.agent.id, entry });
+  return entry;
+}
+
+function appendWireContentPart(ui: UiWireAgent, role: AgentChatRole, text: string): AgentChatEntry {
+  const { entry } = appendStreamingChatText({
+    conversation: ui.conversation.entries,
+    stream: ui.streamingChat,
+    role,
+    text,
+    createEntry: () => createWireChatEntry(ui, role, text, "wire"),
+  });
+  broadcast({ type: "agentChatEntry", agentId: ui.agent.id, entry });
+  return entry;
+}
+
+function emitWireBubble(ui: UiWireAgent, text: string, kind: AgentBubbleKind, ttlMs?: number): void {
+  broadcast({ type: "agentBubble", agentId: ui.agent.id, text, kind, ttlMs });
+}
+
+function updateWireTodoList(ui: UiWireAgent, todos: AgentTodoItem[]): void {
+  ui.todoList = todos;
+  broadcast({ type: "agentTodoList", agentId: ui.agent.id, todos });
+}
+
+function updateWireTodoListFromPayload(ui: UiWireAgent, payload: Record<string, unknown>): void {
+  const todos = extractWireTodoList(payload);
+  if (todos === null) return;
+  updateWireTodoList(ui, todos);
 }
 
 function launchKimi(folderPath: unknown, sessionId?: string): void {
@@ -114,6 +307,387 @@ function launchKimi(folderPath: unknown, sessionId?: string): void {
   const child = spawn(KIMI_EXECUTABLE, args, { cwd, detached: true, stdio: "ignore" });
   child.unref();
   console.log(`[Server] Started Kimi CLI without a terminal at ${cwd}${sessionId ? ` (${sessionId})` : ""}`);
+}
+
+function spawnUiKimiAgent(msg: Extract<ClientMessage, { type: "spawnKimiAgent" }>): void {
+  const cwd = resolveLaunchCwd(msg.workdirPath);
+  const id = nextAgentId++;
+  const key = `wire:${id}`;
+  const agent = createTrackedAgent(id, key, cwd, projectNameFromPath(cwd));
+  rememberAgent(key, agent);
+
+  const wire = new KimiWireSession({ executable: KIMI_EXECUTABLE, cwd, yolo: Boolean(msg.yolo) });
+  const ui: UiWireAgent = {
+    key,
+    agent,
+    wire,
+    conversation: createWireConversationState(id),
+    turnState: "idle",
+    processState: "starting",
+    runningPrompt: null,
+    streamingChat: { activeEntryId: null },
+    isReplaying: false,
+    todoList: [],
+  };
+  wireAgents.set(id, ui);
+  bindWireAgent(ui);
+
+  lastActivityTime = Date.now();
+  broadcast({ type: "agentCreated", id: agent.id, folderName: agent.projectName });
+  setWireProcessState(ui, "starting");
+  broadcast({ type: "kimiSessions", sessions: currentKimiSessions() });
+
+  void (async () => {
+    try {
+      await wire.initialize();
+      setWireProcessState(ui, "ready");
+      setWireTurnState(ui, "idle");
+      if (msg.planMode) {
+        try {
+          await wire.setPlanMode(true);
+        } catch (err) {
+          appendWireChat(ui, "system", `Plan mode unavailable: ${err instanceof Error ? err.message : String(err)}`, "system");
+        }
+      }
+      const initialPrompt = typeof msg.prompt === "string" ? msg.prompt.trim() : "";
+      if (initialPrompt) {
+        await sendWireAgentMessage(id, initialPrompt);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setWireProcessState(ui, "crashed", message);
+      setWireTurnState(ui, "error");
+      appendWireChat(ui, "system", message, "system");
+      emitWireBubble(ui, message, "error", 8_000);
+    }
+  })();
+}
+
+function bindWireAgent(ui: UiWireAgent): void {
+  ui.wire.on("wireEvent", (event: WireEventParams) => {
+    if (ui.isReplaying) {
+      handleReplayWireEvent(ui, event);
+    } else {
+      handleWireEvent(ui, event);
+    }
+  });
+  ui.wire.on("wireRequest", (request: WireRequestEnvelope) => {
+    if (ui.isReplaying) {
+      handleReplayWireRequest(ui, request);
+    } else {
+      handleWireRequest(ui, request);
+    }
+  });
+  ui.wire.on("stderr", (chunk: string) => {
+    const text = chunk.replace(/\s+/g, " ").trim();
+    if (text && /\b(error|failed|traceback|panic)\b/i.test(text)) {
+      appendWireChat(ui, "system", text, "system");
+    }
+  });
+  ui.wire.on("protocolError", (err: Error) => {
+    appendWireChat(ui, "system", err.message, "system");
+  });
+  ui.wire.on("exit", ({ code, signal }: { code: number | null; signal: NodeJS.Signals | null }) => {
+    const expected = ui.processState === "exited";
+    const state: AgentProcessState = expected || code === 0 ? "exited" : "crashed";
+    const detail = `Kimi process exited${code === null ? "" : ` with code ${code}`}${signal ? ` (${signal})` : ""}`;
+    setWireProcessState(ui, state, state === "crashed" ? detail : undefined);
+    setWireTurnState(ui, state === "crashed" ? "error" : "idle");
+    if (state === "crashed") {
+      appendWireChat(ui, "system", detail, "system");
+      emitWireBubble(ui, detail, "error", 8_000);
+    }
+  });
+  ui.wire.on("error", (err: Error) => {
+    setWireProcessState(ui, "crashed", err.message);
+    setWireTurnState(ui, "error");
+    appendWireChat(ui, "system", err.message, "system");
+    emitWireBubble(ui, err.message, "error", 8_000);
+  });
+}
+
+async function replayWireAgentHistory(ui: UiWireAgent): Promise<unknown> {
+  ui.isReplaying = true;
+  try {
+    return await ui.wire.replay();
+  } finally {
+    ui.isReplaying = false;
+  }
+}
+
+async function sendWireAgentMessage(agentId: number, rawText: string): Promise<void> {
+  const ui = wireAgents.get(agentId);
+  if (!ui) return;
+  const text = rawText.trim();
+  if (!text) return;
+  lastActivityTime = Date.now();
+
+  const isRunning = ui.turnState === "running" || ui.turnState === "waiting_for_approval" || ui.turnState === "waiting_for_answer";
+  appendWireChat(ui, "user", text, isRunning ? "steer" : "prompt");
+  emitWireBubble(ui, text, isRunning ? "steer" : "user", 4_000);
+
+  if (ui.processState !== "ready") {
+    const message = "Kimi is not ready yet.";
+    appendWireChat(ui, "system", message, "system");
+    emitWireBubble(ui, message, "error", 5_000);
+    return;
+  }
+
+  if (isRunning) {
+    try {
+      await ui.wire.steer(text);
+      appendWireChat(ui, "system", "Intervention injected into the running turn.", "steer");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      appendWireChat(ui, "system", message, "system");
+      emitWireBubble(ui, message, "error", 6_000);
+    }
+    return;
+  }
+
+  setWireTurnState(ui, "running");
+  ui.agent.lastActivityTime = Date.now();
+  const promptRun = ui.wire.prompt(text);
+  ui.runningPrompt = promptRun;
+  try {
+    const result = await promptRun as { status?: string; steps?: number } | undefined;
+    if (ui.runningPrompt !== promptRun) return;
+    ui.runningPrompt = null;
+    const status = result?.status ?? "finished";
+    if (status === "cancelled") {
+      setWireTurnState(ui, "cancelled");
+      appendWireChat(ui, "system", "Turn cancelled.", "system");
+    } else if (status === "max_steps_reached") {
+      setWireTurnState(ui, "idle");
+      appendWireChat(ui, "system", `Turn stopped after ${result?.steps ?? "max"} steps.`, "system");
+    } else {
+      setWireTurnState(ui, "idle");
+    }
+    clearWireTools(ui);
+  } catch (err) {
+    if (ui.runningPrompt === promptRun) ui.runningPrompt = null;
+    const message = err instanceof Error ? err.message : String(err);
+    setWireTurnState(ui, "error");
+    appendWireChat(ui, "system", message, "system");
+    emitWireBubble(ui, message, "error", 8_000);
+    clearWireTools(ui);
+  }
+}
+
+async function cancelWireAgentTurn(agentId: number): Promise<void> {
+  const ui = wireAgents.get(agentId);
+  if (!ui) return;
+  try {
+    await ui.wire.cancel();
+    setWireTurnState(ui, "cancelled");
+    appendWireChat(ui, "system", "Cancel requested.", "system");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    appendWireChat(ui, "system", message, "system");
+    if (/No agent turn is in progress/i.test(message)) {
+      setWireTurnState(ui, "idle");
+    } else {
+      emitWireBubble(ui, message, "error", 6_000);
+    }
+  }
+}
+
+function closeAgent(id: number): void {
+  const ui = wireAgents.get(id);
+  if (ui) {
+    ui.processState = "exited";
+    ui.wire.removeAllListeners();
+    ui.wire.dispose();
+    wireAgents.delete(id);
+  }
+  const agent = forgetAgentById(id);
+  if (!agent) return;
+  broadcast({ type: "agentClosed", id: agent.id });
+  broadcast({ type: "kimiSessions", sessions: currentKimiSessions() });
+}
+
+function handleWireEvent(ui: UiWireAgent, event: WireEventParams): void {
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  switch (event.type) {
+    case "TurnBegin":
+      resetStreamingChat(ui.streamingChat);
+      setWireTurnState(ui, "running");
+      break;
+    case "TurnEnd":
+      resetStreamingChat(ui.streamingChat);
+      setWireTurnState(ui, "idle");
+      clearWireTools(ui);
+      break;
+    case "StepBegin":
+      setWireTurnState(ui, "running");
+      break;
+    case "StepInterrupted":
+      appendWireChat(ui, "system", "Step interrupted.", "system");
+      break;
+    case "ContentPart": {
+      const part = contentPartText(payload);
+      if (!part || !part.text.trim()) return;
+      const entry = appendWireContentPart(ui, part.role, part.text);
+      if (part.role === "assistant") {
+        emitWireBubble(ui, entry.text, "assistant", 9_000);
+      }
+      break;
+    }
+    case "ToolCall": {
+      updateWireTodoListFromPayload(ui, payload);
+      const tool = formatWireToolStatus(payload);
+      if (!tool) return;
+      ui.agent.activeTools.set(tool.toolId, { toolId: tool.toolId, toolName: tool.toolName, status: tool.status });
+      ui.agent.activeToolNames.set(tool.toolId, tool.toolName);
+      ui.agent.lastActivityTime = Date.now();
+      broadcast({ type: "agentToolStart", id: ui.agent.id, toolId: tool.toolId, status: tool.status });
+      break;
+    }
+    case "ToolResult": {
+      updateWireTodoListFromPayload(ui, payload);
+      const toolId = typeof payload.tool_call_id === "string" ? payload.tool_call_id : "";
+      if (!toolId) return;
+      ui.agent.activeTools.delete(toolId);
+      ui.agent.activeToolNames.delete(toolId);
+      broadcast({ type: "agentToolDone", id: ui.agent.id, toolId });
+      break;
+    }
+    case "ApprovalResponse": {
+      const requestId = typeof payload.request_id === "string" ? payload.request_id : "";
+      if (requestId) {
+        resolveWireRequest(ui.conversation, requestId);
+        broadcast({ type: "agentRequestResolved", agentId: ui.agent.id, requestId });
+      }
+      break;
+    }
+    case "SteerInput": {
+      const text = contentInputText(payload.user_input);
+      if (text) appendWireChat(ui, "system", `Steer accepted: ${text}`, "steer");
+      break;
+    }
+    case "PlanDisplay": {
+      const content = typeof payload.content === "string" ? payload.content : "";
+      const filePath = typeof payload.file_path === "string" ? payload.file_path : "";
+      if (content) appendWireChat(ui, "assistant", `${filePath ? `Plan: ${filePath}\n\n` : ""}${content}`, "wire");
+      break;
+    }
+    case "BtwEnd": {
+      const response = typeof payload.response === "string" ? payload.response : "";
+      const error = typeof payload.error === "string" ? payload.error : "";
+      if (response) appendWireChat(ui, "assistant", response, "wire");
+      if (error) appendWireChat(ui, "system", error, "system");
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+function handleReplayWireEvent(ui: UiWireAgent, event: WireEventParams): void {
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  if (event.type === "ToolCall" || event.type === "ToolResult") {
+    updateWireTodoListFromPayload(ui, payload);
+  }
+  const entry = applyReplayWireEvent(ui.conversation, event);
+  if (entry) {
+    broadcast({ type: "agentChatEntry", agentId: ui.agent.id, entry });
+  }
+}
+
+function handleReplayWireRequest(ui: UiWireAgent, request: WireRequestEnvelope): void {
+  const entry = applyReplayWireRequest(ui.conversation, request);
+  if (entry) {
+    broadcast({ type: "agentChatEntry", agentId: ui.agent.id, entry });
+  }
+}
+
+function handleWireRequest(ui: UiWireAgent, request: WireRequestEnvelope): void {
+  const payload = request.params.payload && typeof request.params.payload === "object"
+    ? request.params.payload as Record<string, unknown>
+    : {};
+  const requestType = request.params.type || "Request";
+  const requestId = typeof payload.id === "string" ? payload.id : request.rpcId;
+
+  if (requestType === "ToolCallRequest") {
+    const toolCallId = typeof payload.id === "string" ? payload.id : request.rpcId;
+    ui.wire.respond(request.rpcId, {
+      tool_call_id: toolCallId,
+      return_value: {
+        is_error: true,
+        output: "External tool calls are not implemented in Pixel Agents yet.",
+        message: "External tool calls are not implemented in Pixel Agents yet.",
+        display: [],
+      },
+    });
+    return;
+  }
+  if (requestType === "HookRequest") {
+    ui.wire.respond(request.rpcId, {
+      request_id: requestId,
+      action: "allow",
+      reason: "",
+    });
+    return;
+  }
+
+  const stored = registerWireRequest(ui.conversation, request);
+  if (stored.entry) {
+    broadcast({ type: "agentChatEntry", agentId: ui.agent.id, entry: stored.entry });
+  }
+  broadcast({ type: "agentRequest", agentId: ui.agent.id, request: { requestId, requestType, payload } });
+  const displayText = requestDisplayText({ type: requestType, payload });
+
+  if (requestType === "ApprovalRequest") {
+    setWireTurnState(ui, "waiting_for_approval");
+    broadcast({ type: "agentToolPermission", id: ui.agent.id });
+    emitWireBubble(ui, displayText, "system", 10_000);
+  } else if (requestType === "QuestionRequest") {
+    setWireTurnState(ui, "waiting_for_answer");
+    emitWireBubble(ui, displayText, "system", 10_000);
+  }
+}
+
+function respondToWireApproval(
+  msg: Extract<ClientMessage, { type: "respondApproval" }>,
+): void {
+  const ui = wireAgents.get(msg.agentId);
+  const pending = ui?.conversation.pendingRequests.get(msg.requestId);
+  if (!ui || !pending) return;
+  const result: Record<string, unknown> = {
+    request_id: msg.requestId,
+    response: msg.response,
+  };
+  const feedback = typeof msg.feedback === "string" ? msg.feedback.trim() : "";
+  if (feedback) result.feedback = feedback;
+  ui.wire.respond(pending.rpcId, result);
+  resolveWireRequest(ui.conversation, msg.requestId);
+  broadcast({ type: "agentRequestResolved", agentId: ui.agent.id, requestId: msg.requestId });
+  broadcast({ type: "agentToolPermissionClear", id: ui.agent.id });
+  setWireTurnState(ui, "running");
+}
+
+function respondToWireQuestion(
+  msg: Extract<ClientMessage, { type: "respondQuestion" }>,
+): void {
+  const ui = wireAgents.get(msg.agentId);
+  const pending = ui?.conversation.pendingRequests.get(msg.requestId);
+  if (!ui || !pending) return;
+  ui.wire.respond(pending.rpcId, {
+    request_id: msg.requestId,
+    answers: msg.answers,
+  });
+  resolveWireRequest(ui.conversation, msg.requestId);
+  broadcast({ type: "agentRequestResolved", agentId: ui.agent.id, requestId: msg.requestId });
+  setWireTurnState(ui, "running");
+}
+
+function clearWireTools(ui: UiWireAgent): void {
+  if (ui.agent.activeTools.size === 0 && ui.agent.activeSubagentToolIds.size === 0) return;
+  ui.agent.activeTools.clear();
+  ui.agent.activeToolNames.clear();
+  ui.agent.activeSubagentToolIds.clear();
+  ui.agent.activeSubagentToolNames.clear();
+  broadcast({ type: "agentToolsClear", id: ui.agent.id });
 }
 
 // Load assets at startup
@@ -250,6 +824,25 @@ function sendInitialData(ws: WebSocket): void {
     // Send null layout to trigger default layout creation in the UI
     ws.send(JSON.stringify({ type: "layoutLoaded", layout: null, version: 0 }));
   }
+
+  for (const ui of wireAgents.values()) {
+    ws.send(JSON.stringify({ type: "agentProcessState", agentId: ui.agent.id, state: ui.processState, pid: ui.wire.pid }));
+    ws.send(JSON.stringify({ type: "agentTurnState", agentId: ui.agent.id, turnState: ui.turnState }));
+    if (ui.todoList.length > 0) {
+      ws.send(JSON.stringify({ type: "agentTodoList", agentId: ui.agent.id, todos: ui.todoList }));
+    }
+    const snapshot = wireConversationSnapshot(ui.conversation);
+    for (const entry of snapshot.entries) {
+      ws.send(JSON.stringify({ type: "agentChatEntry", agentId: ui.agent.id, entry }));
+    }
+    for (const pending of snapshot.requests) {
+      ws.send(JSON.stringify({
+        type: "agentRequest",
+        agentId: ui.agent.id,
+        request: pending,
+      }));
+    }
+  }
 }
 
 wss.on("connection", (ws) => {
@@ -259,7 +852,7 @@ wss.on("connection", (ws) => {
 
   ws.on("message", (raw) => {
     try {
-      const msg = JSON.parse(raw.toString());
+      const msg = JSON.parse(raw.toString()) as ClientMessage;
       if (msg.type === "webviewReady" || msg.type === "ready") {
         sendInitialData(ws);
       } else if (msg.type === "listKimiSessions") {
@@ -268,6 +861,18 @@ wss.on("connection", (ws) => {
         launchKimi(msg.workdirPath, msg.sessionId);
       } else if (msg.type === "openClaude" || msg.type === "openKimi") {
         launchKimi(msg.folderPath);
+      } else if (msg.type === "spawnKimiAgent") {
+        spawnUiKimiAgent(msg);
+      } else if (msg.type === "sendAgentMessage") {
+        void sendWireAgentMessage(msg.agentId, msg.text);
+      } else if (msg.type === "cancelAgentTurn") {
+        void cancelWireAgentTurn(msg.agentId);
+      } else if (msg.type === "respondApproval") {
+        respondToWireApproval(msg);
+      } else if (msg.type === "respondQuestion") {
+        respondToWireQuestion(msg);
+      } else if (msg.type === "closeAgent") {
+        closeAgent(msg.id);
       } else if (msg.type === "saveLayout") {
         try {
           mkdirSync(persistDir, { recursive: true });
@@ -322,28 +927,10 @@ watcher.on("fileAdded", (file: WatchedFile) => {
   }
 
   if (agents.has(file.sessionId)) return;
+  if (adoptWatcherFileForWireAgent(file)) return;
 
-  const agent: TrackedAgent = {
-    id: nextAgentId++,
-    sessionId: file.sessionId,
-    projectDir: dirname(file.path),
-    projectName: file.projectName,
-    jsonlFile: file.path,
-    fileOffset: 0,
-    lineBuffer: "",
-    activity: "idle",
-    activeTools: new Map(),
-    activeToolNames: new Map(),
-    activeSubagentToolIds: new Map(),
-    activeSubagentToolNames: new Map(),
-    isWaiting: false,
-    permissionSent: false,
-    hadToolsInTurn: false,
-    lastActivityTime: Date.now(),
-    pendingAgentToolIds: [],
-  };
-
-  agents.set(file.sessionId, agent);
+  const agent = createTrackedAgent(nextAgentId++, file.sessionId, dirname(file.path), file.projectName, file.path);
+  rememberAgent(file.sessionId, agent);
   broadcast({ type: "agentCreated", id: agent.id, folderName: agent.projectName });
   broadcast({ type: "kimiSessions", sessions: currentKimiSessions() });
   console.log(`Agent ${agent.id} joined: ${agent.projectName} (${file.sessionId.slice(0, 8)})`);
@@ -363,8 +950,10 @@ watcher.on("fileRemoved", (file: WatchedFile) => {
   if (file.kind === "subagent") return;
   const agent = agents.get(file.sessionId);
   if (!agent) return;
+  if (wireAgents.has(agent.id)) return;
 
   agents.delete(file.sessionId);
+  agentKeysById.delete(agent.id);
   broadcast({ type: "agentClosed", id: agent.id });
   broadcast({ type: "kimiSessions", sessions: currentKimiSessions() });
   console.log(`Agent ${agent.id} left: ${agent.projectName}`);
@@ -374,6 +963,7 @@ watcher.on("line", (file: WatchedFile, line: string) => {
   const agent = agents.get(file.sessionId);
   if (!agent) return;
   lastActivityTime = Date.now();
+  if (wireAgents.has(agent.id)) return;
 
   if (file.kind === "subagent") {
     if (!file.parentToolId) bindSubagentFile(file);
@@ -404,6 +994,9 @@ setInterval(() => {
 
 // Graceful shutdown
 process.on("SIGINT", () => {
+  for (const ui of wireAgents.values()) {
+    ui.wire.dispose();
+  }
   watcher.stop();
   server.close();
   process.exit(0);

@@ -1,8 +1,22 @@
-import type { CSSProperties } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import type { OfficeState } from '../office/engine/officeState.js'
 import type { AgentPresence, AgentTimelineEvent, ToolActivity } from '../office/types.js'
-import type { SubagentCharacter } from '../hooks/useExtensionMessages.js'
+import type {
+  AgentChatEntry,
+  AgentProcessInfo,
+  AgentRequestMessage,
+  AgentTurnState,
+  SubagentCharacter,
+} from '../hooks/useExtensionMessages.js'
 import { flattenSubagentTools, getPresenceMeta, PRESENCE_META } from '../office/presence.js'
+import {
+  buildQuestionAnswers,
+  hasAnswerForEveryQuestion,
+  normalizeQuestionItems,
+  toggleMultiSelectAnswer,
+  type QuestionDraftValue,
+} from './agentRequestModel.js'
+import { coalesceVisibleAgentChatEntries } from '../hooks/agentChats.js'
 
 interface AgentSidebarProps {
   officeState: OfficeState
@@ -11,11 +25,19 @@ interface AgentSidebarProps {
   agentTools: Record<number, ToolActivity[]>
   agentStatuses: Record<number, string>
   agentPresences: Record<number, AgentPresence>
+  agentChats: Record<number, AgentChatEntry[]>
+  agentTurnStates: Record<number, AgentTurnState>
+  agentProcessStates: Record<number, AgentProcessInfo>
+  agentRequests: Record<number, AgentRequestMessage[]>
   subagentTools: Record<number, Record<string, ToolActivity[]>>
   subagentCharacters: SubagentCharacter[]
   eventLog: AgentTimelineEvent[]
   onSelectAgent: (id: number) => void
   onCloseAgent: (id: number) => void
+  onSendAgentMessage: (agentId: number, text: string) => void
+  onCancelAgentTurn: (agentId: number) => void
+  onRespondApproval: (agentId: number, requestId: string, response: 'approve' | 'approve_for_session' | 'reject', feedback?: string) => void
+  onRespondQuestion: (agentId: number, requestId: string, answers: Record<string, string>) => void
 }
 
 const sidebarStyle: CSSProperties = {
@@ -115,6 +137,388 @@ function PresencePill({ presence }: { presence: AgentPresence }) {
   )
 }
 
+function payloadText(payload: Record<string, unknown>, fallback: string): string {
+  const description = payload.description
+  const action = payload.action
+  if (typeof description === 'string' && description.trim()) return description
+  if (typeof action === 'string' && action.trim()) return action
+  return fallback
+}
+
+function displayBlockText(block: unknown): string | null {
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return null
+  const record = block as Record<string, unknown>
+  if (record.type === 'brief' && typeof record.text === 'string') return record.text
+  if (record.type === 'shell' && typeof record.command === 'string') return `$ ${record.command}`
+  if (record.type === 'diff' && typeof record.path === 'string') return `Diff: ${record.path}`
+  if (record.type === 'todo' && Array.isArray(record.items)) return `${record.items.length} todo item(s)`
+  return null
+}
+
+function DisplayBlocks({ payload }: { payload: Record<string, unknown> }) {
+  const blocks = Array.isArray(payload.display)
+    ? payload.display.map(displayBlockText).filter((text): text is string => Boolean(text))
+    : []
+  if (blocks.length === 0) return null
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginBottom: 6 }}>
+      {blocks.map((block, index) => (
+        <div
+          key={`${index}:${block}`}
+          style={{
+            fontSize: 16,
+            color: 'var(--pixel-text-dim)',
+            borderLeft: '2px solid var(--pixel-border)',
+            paddingLeft: 6,
+            overflowWrap: 'anywhere',
+          }}
+        >
+          {block}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function ApprovalRequestCard({
+  agentId,
+  request,
+  onRespondApproval,
+}: {
+  agentId: number
+  request: AgentRequestMessage
+  onRespondApproval: AgentSidebarProps['onRespondApproval']
+}) {
+  const [feedback, setFeedback] = useState('')
+  const payload = request.payload || {}
+  const description = payloadText(payload, request.requestType)
+  const sender = typeof payload.sender === 'string' && payload.sender.trim() ? payload.sender : 'Kimi'
+  const submit = (response: 'approve' | 'approve_for_session' | 'reject') => {
+    onRespondApproval(agentId, request.requestId, response, feedback.trim() || undefined)
+  }
+
+  return (
+    <div style={{ border: '2px solid var(--pixel-status-permission)', padding: 6, background: 'rgba(204, 167, 0, 0.12)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6 }}>
+        <div style={{ fontSize: 18, color: 'var(--pixel-status-permission)' }}>Approval needed</div>
+        <div style={{ fontSize: 16, color: 'var(--pixel-text-dim)' }}>{sender}</div>
+      </div>
+      <div style={{ fontSize: 18, color: 'var(--vscode-foreground)', marginBottom: 5 }}>{description}</div>
+      <DisplayBlocks payload={payload} />
+      <textarea
+        value={feedback}
+        onChange={(e) => setFeedback(e.target.value)}
+        placeholder="Optional feedback for Kimi, especially when rejecting…"
+        rows={2}
+        style={requestTextareaStyle}
+      />
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        <button style={miniButtonStyle} onClick={() => submit('approve')}>Approve once</button>
+        <button style={miniButtonStyle} onClick={() => submit('approve_for_session')}>Session</button>
+        <button style={{ ...miniButtonStyle, color: 'var(--pixel-status-error)' }} onClick={() => submit('reject')}>Reject</button>
+      </div>
+    </div>
+  )
+}
+
+function QuestionRequestCard({
+  agentId,
+  request,
+  onRespondQuestion,
+}: {
+  agentId: number
+  request: AgentRequestMessage
+  onRespondQuestion: AgentSidebarProps['onRespondQuestion']
+}) {
+  const questions = normalizeQuestionItems(request.payload || {})
+  const [draft, setDraft] = useState<Record<string, QuestionDraftValue>>({})
+  const canSubmit = hasAnswerForEveryQuestion(questions, draft)
+
+  const setAnswer = (question: string, value: QuestionDraftValue) => {
+    setDraft((prev) => ({ ...prev, [question]: value }))
+  }
+
+  return (
+    <div style={{ border: '2px solid var(--pixel-status-waiting)', padding: 6, background: 'rgba(209, 134, 22, 0.12)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6, marginBottom: 5 }}>
+        <div style={{ fontSize: 18, color: 'var(--pixel-status-waiting)' }}>Question</div>
+        <div style={{ fontSize: 16, color: 'var(--pixel-text-dim)' }}>{questions.length} item{questions.length === 1 ? '' : 's'}</div>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {questions.map((question, index) => {
+          const value = draft[question.question]
+          const selectedSet = new Set(Array.isArray(value) ? value : typeof value === 'string' ? [value] : [])
+          return (
+            <div key={question.question} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+                <span style={{ color: 'var(--pixel-text-dim)', fontSize: 15 }}>{index + 1}/{questions.length}</span>
+                {question.header && (
+                  <span style={{ color: 'var(--pixel-status-waiting)', fontSize: 15, border: '1px solid currentColor', padding: '0 4px' }}>
+                    {question.header}
+                  </span>
+                )}
+                {question.multiSelect && <span style={{ color: 'var(--pixel-text-dim)', fontSize: 15 }}>multi-select</span>}
+              </div>
+              <div style={{ fontSize: 19, color: 'var(--vscode-foreground)' }}>{question.question}</div>
+              {question.options.length === 0 ? (
+                <textarea
+                  value={typeof value === 'string' ? value : ''}
+                  onChange={(e) => setAnswer(question.question, e.target.value)}
+                  placeholder="Type your answer…"
+                  rows={2}
+                  style={requestTextareaStyle}
+                />
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {question.options.map((option) => {
+                    const selected = selectedSet.has(option.label)
+                    return (
+                      <button
+                        key={option.label}
+                        onClick={() => {
+                          if (question.multiSelect) {
+                            setDraft((prev) => ({
+                              ...prev,
+                              [question.question]: toggleMultiSelectAnswer(
+                                question,
+                                Array.isArray(prev[question.question]) ? prev[question.question] as string[] : [],
+                                option.label,
+                              ),
+                            }))
+                          } else {
+                            setAnswer(question.question, option.label)
+                          }
+                        }}
+                        style={{
+                          ...miniButtonStyle,
+                          textAlign: 'left',
+                          borderColor: selected ? 'var(--pixel-status-waiting)' : 'var(--pixel-border)',
+                          background: selected ? 'rgba(209, 134, 22, 0.22)' : miniButtonStyle.background,
+                        }}
+                      >
+                        {option.label}
+                        {option.description && <span style={{ display: 'block', color: 'var(--pixel-text-dim)', fontSize: 15 }}>{option.description}</span>}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 4, marginTop: 7 }}>
+        <button style={miniButtonStyle} onClick={() => onRespondQuestion(agentId, request.requestId, {})}>Skip</button>
+        <button
+          style={{ ...miniButtonStyle, opacity: canSubmit ? 1 : 0.45, cursor: canSubmit ? 'pointer' : 'default' }}
+          disabled={!canSubmit}
+          onClick={() => onRespondQuestion(agentId, request.requestId, buildQuestionAnswers(questions, draft))}
+        >
+          Submit
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function RequestCard({
+  agentId,
+  request,
+  onRespondApproval,
+  onRespondQuestion,
+}: {
+  agentId: number
+  request: AgentRequestMessage
+  onRespondApproval: AgentSidebarProps['onRespondApproval']
+  onRespondQuestion: AgentSidebarProps['onRespondQuestion']
+}) {
+  if (request.requestType === 'QuestionRequest') {
+    return <QuestionRequestCard agentId={agentId} request={request} onRespondQuestion={onRespondQuestion} />
+  }
+  return <ApprovalRequestCard agentId={agentId} request={request} onRespondApproval={onRespondApproval} />
+}
+
+const miniButtonStyle: CSSProperties = {
+  background: 'var(--pixel-btn-bg)',
+  color: 'var(--pixel-text)',
+  border: '2px solid var(--pixel-border)',
+  borderRadius: 0,
+  padding: '3px 6px',
+  fontSize: 17,
+  cursor: 'pointer',
+}
+
+const requestTextareaStyle: CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box',
+  resize: 'vertical',
+  background: 'rgba(255, 255, 255, 0.08)',
+  color: 'var(--pixel-text)',
+  border: '2px solid var(--pixel-border)',
+  borderRadius: 0,
+  padding: '4px 6px',
+  fontSize: 17,
+  outline: 'none',
+  marginBottom: 5,
+}
+
+function ChatPanel({
+  agentId,
+  messages,
+  requests,
+  turnState,
+  process,
+  onSendAgentMessage,
+  onCancelAgentTurn,
+  onRespondApproval,
+  onRespondQuestion,
+}: {
+  agentId: number | null | undefined
+  messages: AgentChatEntry[]
+  requests: AgentRequestMessage[]
+  turnState: AgentTurnState | undefined
+  process: AgentProcessInfo | undefined
+  onSendAgentMessage: AgentSidebarProps['onSendAgentMessage']
+  onCancelAgentTurn: AgentSidebarProps['onCancelAgentTurn']
+  onRespondApproval: AgentSidebarProps['onRespondApproval']
+  onRespondQuestion: AgentSidebarProps['onRespondQuestion']
+}) {
+  const [draft, setDraft] = useState('')
+  const listRef = useRef<HTMLDivElement>(null)
+  const isDirectChatAgent = process?.state === 'ready'
+  const canSend = agentId !== null
+    && agentId !== undefined
+    && draft.trim().length > 0
+    && isDirectChatAgent
+  const running = turnState === 'running' || turnState === 'waiting_for_approval' || turnState === 'waiting_for_answer'
+  const visibleMessages = coalesceVisibleAgentChatEntries(messages)
+  const lastMessage = visibleMessages[visibleMessages.length - 1]
+
+  useEffect(() => {
+    listRef.current?.scrollTo({ top: listRef.current.scrollHeight })
+  }, [visibleMessages.length, lastMessage?.id, lastMessage?.text, requests.length, agentId])
+
+  const send = () => {
+    if (!canSend || agentId === null || agentId === undefined) return
+    onSendAgentMessage(agentId, draft)
+    setDraft('')
+  }
+
+  const stateLabel = !process
+    ? 'External'
+    : process.state === 'starting'
+      ? 'Starting'
+      : process.state === 'crashed'
+      ? 'Crashed'
+      : process.state === 'exited'
+        ? 'Exited'
+        : turnState === 'waiting_for_approval'
+          ? 'Approval'
+          : turnState === 'waiting_for_answer'
+            ? 'Question'
+            : turnState === 'running'
+              ? 'Running'
+              : 'Ready'
+
+  return (
+    <div style={{ ...panelStyle, minHeight: 215, maxHeight: 320, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div style={{ padding: '8px 10px 4px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <div style={sectionTitleStyle}>Chat</div>
+        <span style={{ color: process?.state === 'crashed' ? 'var(--pixel-status-error)' : running ? 'var(--pixel-status-active)' : 'var(--pixel-text-dim)', fontSize: 17 }}>
+          {stateLabel}
+        </span>
+      </div>
+
+      <div ref={listRef} style={{ padding: '0 10px 6px', overflow: 'auto', minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', gap: 5 }}>
+        {messages.length === 0 && requests.length === 0 ? (
+          <div style={{ fontSize: 19, color: 'var(--pixel-text-dim)' }}>
+            {agentId === null || agentId === undefined ? 'Select an agent to chat.' : 'No chat yet.'}
+          </div>
+        ) : visibleMessages.map((message) => (
+          <div
+            key={message.id}
+            style={{
+              alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start',
+              maxWidth: '92%',
+              background: message.role === 'user'
+                ? 'rgba(90, 140, 255, 0.18)'
+                : message.role === 'assistant'
+                  ? 'rgba(90, 200, 140, 0.16)'
+                  : message.role === 'thinking'
+                    ? 'rgba(180, 140, 255, 0.12)'
+                    : 'rgba(255, 255, 255, 0.08)',
+              border: `1px solid ${message.role === 'user'
+                ? 'rgba(90, 140, 255, 0.55)'
+                : message.role === 'assistant'
+                  ? 'rgba(90, 200, 140, 0.55)'
+                  : 'rgba(255, 255, 255, 0.16)'}`,
+              padding: '4px 6px',
+              fontSize: 18,
+              color: 'var(--vscode-foreground)',
+              whiteSpace: 'pre-wrap',
+              overflowWrap: 'anywhere',
+            }}
+          >
+            <div style={{ color: 'var(--pixel-text-dim)', fontSize: 14, marginBottom: 1 }}>
+              {message.role === 'thinking' ? 'thinking' : message.source === 'steer' ? 'steer' : message.role}
+            </div>
+            {message.text}
+          </div>
+        ))}
+
+        {agentId !== null && agentId !== undefined && requests.map((request) => (
+          <RequestCard
+            key={request.requestId}
+            agentId={agentId}
+            request={request}
+            onRespondApproval={onRespondApproval}
+            onRespondQuestion={onRespondQuestion}
+          />
+        ))}
+      </div>
+
+      <div style={{ padding: '6px 10px 9px', display: 'grid', gridTemplateColumns: running ? '1fr auto auto' : '1fr auto', gap: 5 }}>
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              send()
+            }
+          }}
+          placeholder={!process ? 'Open a New Kimi Agent for direct chat…' : running ? 'Steer the running turn…' : 'Message Kimi…'}
+          disabled={!isDirectChatAgent}
+          rows={2}
+          style={{
+            minWidth: 0,
+            resize: 'none',
+            background: 'rgba(255, 255, 255, 0.08)',
+            color: 'var(--pixel-text)',
+            border: '2px solid var(--pixel-border)',
+            borderRadius: 0,
+            padding: '4px 6px',
+            fontSize: 18,
+            outline: 'none',
+          }}
+        />
+        {running && agentId !== null && agentId !== undefined && (
+          <button style={{ ...miniButtonStyle, color: 'var(--pixel-status-error)' }} onClick={() => onCancelAgentTurn(agentId)}>
+            Cancel
+          </button>
+        )}
+        <button
+          style={{ ...miniButtonStyle, opacity: canSend ? 1 : 0.45, cursor: canSend ? 'pointer' : 'default' }}
+          onClick={send}
+          disabled={!canSend}
+        >
+          {running ? 'Steer' : 'Send'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function EventRow({ event }: { event: AgentTimelineEvent }) {
   const presence = event.presence
   const color = presence ? PRESENCE_META[presence].color : 'var(--pixel-text-dim)'
@@ -161,11 +565,19 @@ export function AgentSidebar({
   agentTools,
   agentStatuses,
   agentPresences,
+  agentChats,
+  agentTurnStates,
+  agentProcessStates,
+  agentRequests,
   subagentTools,
   subagentCharacters,
   eventLog,
   onSelectAgent,
   onCloseAgent,
+  onSendAgentMessage,
+  onCancelAgentTurn,
+  onRespondApproval,
+  onRespondQuestion,
 }: AgentSidebarProps) {
   const selectedCh = selectedAgent === null ? null : officeState.characters.get(selectedAgent)
   const selectedParentId = selectedCh?.isSubagent ? selectedCh.parentAgentId : selectedAgent
@@ -192,6 +604,10 @@ export function AgentSidebar({
   const recentEvents = selectedParentId === null || selectedParentId === undefined
     ? eventLog.slice(0, 20)
     : eventLog.filter((event) => event.agentId === selectedParentId).slice(0, 20)
+  const selectedChat = selectedParentId === null || selectedParentId === undefined ? [] : agentChats[selectedParentId] || []
+  const selectedRequests = selectedParentId === null || selectedParentId === undefined ? [] : agentRequests[selectedParentId] || []
+  const selectedTurnState = selectedParentId === null || selectedParentId === undefined ? undefined : agentTurnStates[selectedParentId]
+  const selectedProcess = selectedParentId === null || selectedParentId === undefined ? undefined : agentProcessStates[selectedParentId]
 
   return (
     <aside style={sidebarStyle}>
@@ -298,6 +714,18 @@ export function AgentSidebar({
           </button>
         )}
       </div>
+
+      <ChatPanel
+        agentId={selectedParentId}
+        messages={selectedChat}
+        requests={selectedRequests}
+        turnState={selectedTurnState}
+        process={selectedProcess}
+        onSendAgentMessage={onSendAgentMessage}
+        onCancelAgentTurn={onCancelAgentTurn}
+        onRespondApproval={onRespondApproval}
+        onRespondQuestion={onRespondQuestion}
+      />
 
       <div style={{ ...panelStyle, minHeight: 0, flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: '8px 10px 4px' }}>

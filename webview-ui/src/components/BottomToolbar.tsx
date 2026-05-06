@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { SettingsModal } from './SettingsModal.js'
+import { AgentSpawnDialog, type SpawnKimiAgentInput } from './AgentSpawnDialog.js'
 import type { KimiSessionSummary } from '../hooks/useExtensionMessages.js'
 
 interface BottomToolbarProps {
@@ -10,6 +11,7 @@ interface BottomToolbarProps {
   kimiSessions: KimiSessionSummary[]
   onRefreshKimiSessions: () => void
   onResumeKimiSession: (session: KimiSessionSummary) => void
+  onSpawnKimiAgent: (input: SpawnKimiAgentInput) => void
 }
 
 const panelStyle: React.CSSProperties = {
@@ -52,28 +54,32 @@ export function BottomToolbar({
   kimiSessions,
   onRefreshKimiSessions,
   onResumeKimiSession,
+  onSpawnKimiAgent,
 }: BottomToolbarProps) {
   const [hovered, setHovered] = useState<string | null>(null)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isSessionPickerOpen, setIsSessionPickerOpen] = useState(false)
+  const [isSpawnDialogOpen, setIsSpawnDialogOpen] = useState(false)
   const [hoveredSession, setHoveredSession] = useState<string | null>(null)
   const sessionPickerRef = useRef<HTMLDivElement>(null)
 
   // Close session picker on outside click
   useEffect(() => {
-    if (!isSessionPickerOpen) return
+    if (!isSessionPickerOpen && !isSpawnDialogOpen) return
     const handleClick = (e: MouseEvent) => {
       if (sessionPickerRef.current && !sessionPickerRef.current.contains(e.target as Node)) {
         setIsSessionPickerOpen(false)
+        setIsSpawnDialogOpen(false)
       }
     }
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
-  }, [isSessionPickerOpen])
+  }, [isSessionPickerOpen, isSpawnDialogOpen])
 
   const handleAgentClick = () => {
     onRefreshKimiSessions()
     setIsSessionPickerOpen((v) => !v)
+    setIsSpawnDialogOpen(false)
   }
 
   const handleSessionSelect = (session: KimiSessionSummary) => {
@@ -128,6 +134,28 @@ export function BottomToolbar({
               zIndex: 'var(--pixel-controls-z)',
             }}
           >
+            <button
+              onClick={() => {
+                setIsSessionPickerOpen(false)
+                setIsSpawnDialogOpen(true)
+              }}
+              style={{
+                width: '100%',
+                textAlign: 'left',
+                padding: '8px 10px',
+                fontSize: '22px',
+                color: 'var(--pixel-agent-text)',
+                background: 'var(--pixel-agent-bg)',
+                border: 'none',
+                borderBottom: '2px solid var(--pixel-border)',
+                cursor: 'pointer',
+              }}
+            >
+              New Kimi Agent…
+              <span style={{ display: 'block', color: 'var(--pixel-text-dim)', fontSize: 16 }}>
+                Chat directly through Wire, no Terminal
+              </span>
+            </button>
             {kimiSessions.length === 0 ? (
               <div
                 style={{
@@ -191,6 +219,13 @@ export function BottomToolbar({
               </button>
             ))}
           </div>
+        )}
+        {isSpawnDialogOpen && (
+          <AgentSpawnDialog
+            defaultWorkdir={kimiSessions.find((s) => s.workdirPath)?.workdirPath || ''}
+            onClose={() => setIsSpawnDialogOpen(false)}
+            onSpawn={onSpawnKimiAgent}
+          />
         )}
       </div>
       <button

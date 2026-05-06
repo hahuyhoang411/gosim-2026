@@ -2,8 +2,8 @@
 # pixel-agents-kimi auto-launch hook
 # Called from a kimi-cli session-start hook configured in ~/.kimi/config.toml
 
-# Change this to wherever you cloned pixel-agents-kimi-standalone
-PIXEL_AGENTS_DIR="$HOME/Desktop/pixel-agents-kimi-standalone"
+# Resolve repo root from this hook location
+PIXEL_AGENTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT=3456
 PID_FILE="$PIXEL_AGENTS_DIR/.server.pid"
 
@@ -21,5 +21,5 @@ fi
 
 # Start server
 cd "$PIXEL_AGENTS_DIR"
-node dist/server.js > /tmp/pixel-agents-kimi.log 2>&1 &
+bun run start > /tmp/pixel-agents-kimi.log 2>&1 &
 echo $! > "$PID_FILE"
