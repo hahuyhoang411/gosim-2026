@@ -234,8 +234,12 @@ export function formatWireToolStatus(payload: Record<string, unknown>): { toolId
       break;
     case "Agent":
     case "Task": {
+      // kimi streams Agent args across ToolCall + ToolCallPart events, so the
+      // description is often missing on the initial ToolCall. Always emit the
+      // "Subtask:" prefix so the UI can spawn the subagent character; the desc
+      // can fill in as sidebar detail later.
       const desc = oneLine(input.description, 41);
-      status = desc ? `Subtask: ${desc}` : "Running subtask";
+      status = `Subtask: ${desc || "…"}`;
       break;
     }
     case "AskUserQuestion":

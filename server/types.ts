@@ -66,10 +66,10 @@ export type ServerMessage =
   | { type: "agentCreated"; id: number; folderName: string }
   | { type: "agentRenamed"; id: number; folderName: string }
   | { type: "agentClosed"; id: number }
-  | { type: "existingAgents"; agents: number[]; folderNames: Record<number, string>; agentMeta?: Record<number, { palette?: number; hueShift?: number; seatId?: string }> }
+  | { type: "existingAgents"; agents: number[]; folderNames: Record<number, string>; agentMeta?: Record<number, { palette?: number; hueShift?: number; seatId?: string; name?: string }> }
   | { type: "agentToolStart"; id: number; toolId: string; status: string }
   | { type: "agentToolDone"; id: number; toolId: string }
-  | { type: "agentToolsClear"; id: number }
+  | { type: "agentToolsClear"; id: number; preserveSubagents?: boolean }
   | { type: "agentStatus"; id: number; status: string }
   | { type: "agentChatEntry"; agentId: number; entry: AgentChatEntry }
   | { type: "agentBubble"; agentId: number; text: string; kind: AgentBubbleKind; ttlMs?: number }
@@ -107,4 +107,4 @@ export type ClientMessage =
   | { type: "resumeKimiSession"; sessionId: string; workdirPath?: string }
   | { type: "focusAgent"; id: number }
   | { type: "saveLayout"; layout: unknown }
-  | { type: "saveAgentSeats"; seats: Record<number, { palette: number; hueShift: number; seatId: string | null }> };
+  | { type: "saveAgentSeats"; seats: Record<number, { palette: number; hueShift: number; seatId: string | null; name?: string }> };

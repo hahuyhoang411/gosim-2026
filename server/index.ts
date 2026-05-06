@@ -466,15 +466,28 @@ function handleWireEvent(ui: UiWireAgent, event: WireEventParams): void {
     case "ToolCall": {
       const tool = formatWireToolStatus(payload);
       if (!tool) return;
+      const isKnownTool = ui.agent.activeTools.has(tool.toolId) || ui.agent.activeSubagentToolIds.has(tool.toolId);
       ui.agent.activeTools.set(tool.toolId, { toolId: tool.toolId, toolName: tool.toolName, status: tool.status });
       ui.agent.activeToolNames.set(tool.toolId, tool.toolName);
       ui.agent.lastActivityTime = Date.now();
+      // Mirror parser.ts: queue Agent/Task tool ids so the file watcher can pair the eventual
+      // subagents/<aid>/context.jsonl back to this parent invocation.
+      if ((tool.toolName === "Agent" || tool.toolName === "Task") && !isKnownTool) {
+        ui.agent.pendingAgentToolIds.push(tool.toolId);
+        ui.agent.activeSubagentToolIds.set(tool.toolId, new Set());
+        ui.agent.activeSubagentToolNames.set(tool.toolId, new Map());
+      }
       broadcast({ type: "agentToolStart", id: ui.agent.id, toolId: tool.toolId, status: tool.status });
       break;
     }
     case "ToolResult": {
       const toolId = typeof payload.tool_call_id === "string" ? payload.tool_call_id : "";
       if (!toolId) return;
+      // Agent/Task in kimi-cli is a background dispatch: ToolResult fires within
+      // ms of the call with status: "starting" while the actual subagent keeps
+      // running in subagents/<aid>/. Do NOT clear the subagent character here —
+      // the watcher's fileRemoved handler tears it down when the subagent file
+      // goes stale.
       ui.agent.activeTools.delete(toolId);
       ui.agent.activeToolNames.delete(toolId);
       broadcast({ type: "agentToolDone", id: ui.agent.id, toolId });
@@ -594,12 +607,10 @@ function respondToWireQuestion(
 }
 
 function clearWireTools(ui: UiWireAgent): void {
-  if (ui.agent.activeTools.size === 0 && ui.agent.activeSubagentToolIds.size === 0) return;
+  if (ui.agent.activeTools.size === 0) return;
   ui.agent.activeTools.clear();
   ui.agent.activeToolNames.clear();
-  ui.agent.activeSubagentToolIds.clear();
-  ui.agent.activeSubagentToolNames.clear();
-  broadcast({ type: "agentToolsClear", id: ui.agent.id });
+  broadcast({ type: "agentToolsClear", id: ui.agent.id, preserveSubagents: true });
 }
 
 // Load assets at startup
@@ -636,7 +647,7 @@ function loadLayout(): Record<string, unknown> | null {
   return loadDefaultLayout(assetsRoot);
 }
 
-function loadPersistedSeats(): Record<number, { palette: number; hueShift: number; seatId: string | null }> | null {
+function loadPersistedSeats(): Record<number, { palette: number; hueShift: number; seatId: string | null; name?: string }> | null {
   if (existsSync(persistedSeatsPath)) {
     try {
       const content = readFileSync(persistedSeatsPath, "utf-8");
@@ -719,12 +730,12 @@ function sendInitialData(ws: WebSocket): void {
   const agentList = Array.from(agents.values());
   const agentIds = agentList.map((a) => a.id);
   const folderNames: Record<number, string> = {};
-  const agentMeta: Record<number, { palette?: number; hueShift?: number; seatId?: string }> = {};
+  const agentMeta: Record<number, { palette?: number; hueShift?: number; seatId?: string; name?: string }> = {};
   for (const a of agentList) {
     folderNames[a.id] = a.projectName;
     if (persistedSeats?.[a.id]) {
       const s = persistedSeats[a.id];
-      agentMeta[a.id] = { palette: s.palette, hueShift: s.hueShift, seatId: s.seatId ?? undefined };
+      agentMeta[a.id] = { palette: s.palette, hueShift: s.hueShift, seatId: s.seatId ?? undefined, name: s.name };
     }
   }
   ws.send(JSON.stringify({ type: "existingAgents", agents: agentIds, folderNames, agentMeta }));
@@ -803,7 +814,15 @@ wss.on("connection", (ws) => {
       } else if (msg.type === "saveAgentSeats") {
         try {
           mkdirSync(persistDir, { recursive: true });
-          writeFileSync(persistedSeatsPath, JSON.stringify(msg.seats, null, 2));
+          const previous = loadPersistedSeats() ?? {};
+          const seats = msg.seats;
+          for (const [id, seat] of Object.entries(seats)) {
+            if (!seat.name) {
+              const prevName = previous[Number(id)]?.name;
+              if (prevName) seat.name = prevName;
+            }
+          }
+          writeFileSync(persistedSeatsPath, JSON.stringify(seats, null, 2));
         } catch (err) {
           console.error(`[Server] Failed to save agent seats: ${err instanceof Error ? err.message : err}`);
         }
@@ -859,7 +878,24 @@ watcher.on("fileRenamed", (file: WatchedFile) => {
 });
 
 watcher.on("fileRemoved", (file: WatchedFile) => {
-  if (file.kind === "subagent") return;
+  if (file.kind === "subagent") {
+    // Subagent's context.jsonl went stale (~10 min idle) → tear the character down.
+    if (file.parentToolId) {
+      const parentAgent = agents.get(file.sessionId);
+      if (parentAgent) {
+        const shouldNotify = parentAgent.activeSubagentToolIds.has(file.parentToolId)
+          || parentAgent.activeSubagentToolNames.has(file.parentToolId)
+          || parentAgent.pendingAgentToolIds.includes(file.parentToolId);
+        parentAgent.activeSubagentToolIds.delete(file.parentToolId);
+        parentAgent.activeSubagentToolNames.delete(file.parentToolId);
+        parentAgent.pendingAgentToolIds = parentAgent.pendingAgentToolIds.filter((id) => id !== file.parentToolId);
+        if (shouldNotify) {
+          broadcast({ type: "subagentClear", id: parentAgent.id, parentToolId: file.parentToolId });
+        }
+      }
+    }
+    return;
+  }
   const agent = agents.get(file.sessionId);
   if (!agent) return;
   if (wireAgents.has(agent.id)) return;
@@ -875,7 +911,6 @@ watcher.on("line", (file: WatchedFile, line: string) => {
   const agent = agents.get(file.sessionId);
   if (!agent) return;
   lastActivityTime = Date.now();
-  if (wireAgents.has(agent.id)) return;
 
   if (file.kind === "subagent") {
     if (!file.parentToolId) bindSubagentFile(file);
@@ -884,6 +919,8 @@ watcher.on("line", (file: WatchedFile, line: string) => {
     return;
   }
 
+  // Wire-managed agents get their parent transcript through JSON-RPC events instead.
+  if (wireAgents.has(agent.id)) return;
   processTranscriptLine(line, agent, broadcast);
 });
 

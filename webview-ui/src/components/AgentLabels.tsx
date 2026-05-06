@@ -11,6 +11,7 @@ interface AgentLabelsProps {
   zoom: number
   panRef: React.RefObject<{ x: number; y: number }>
   subagentCharacters: SubagentCharacter[]
+  agentNames: Record<number, string>
 }
 
 export function AgentLabels({
@@ -21,6 +22,7 @@ export function AgentLabels({
   zoom,
   panRef,
   subagentCharacters,
+  agentNames,
 }: AgentLabelsProps) {
   const [, setTick] = useState(0)
   useEffect(() => {
@@ -46,10 +48,10 @@ export function AgentLabels({
   const deviceOffsetX = Math.floor((canvasW - mapW) / 2) + Math.round(panRef.current.x)
   const deviceOffsetY = Math.floor((canvasH - mapH) / 2) + Math.round(panRef.current.y)
 
-  // Build sub-agent label lookup
-  const subLabelMap = new Map<number, string>()
+  // Build sub-agent name lookups
+  const subNameMap = new Map<number, string>()
   for (const sub of subagentCharacters) {
-    subLabelMap.set(sub.id, sub.label)
+    subNameMap.set(sub.id, sub.name)
   }
 
   // All character IDs to render labels for (regular agents + sub-agents)
@@ -78,7 +80,9 @@ export function AgentLabels({
           dotColor = 'var(--vscode-charts-blue, #3794ff)'
         }
 
-        const labelText = subLabelMap.get(id) || ch.folderName || `Agent #${id}`
+        const primary = isSub
+          ? (subNameMap.get(id) || `Agent #${id}`)
+          : (agentNames[id] || ch.folderName || `Agent #${id}`)
 
         return (
           <div
@@ -109,19 +113,16 @@ export function AgentLabels({
             )}
             <span
               style={{
-                fontSize: isSub ? '16px' : '18px',
+                fontSize: '18px',
                 fontStyle: isSub ? 'italic' : undefined,
                 color: 'var(--vscode-foreground)',
                 background: 'rgba(30,30,46,0.7)',
                 padding: '1px 4px',
                 borderRadius: 2,
                 whiteSpace: 'nowrap',
-                maxWidth: isSub ? 120 : undefined,
-                overflow: isSub ? 'hidden' : undefined,
-                textOverflow: isSub ? 'ellipsis' : undefined,
               }}
             >
-              {labelText}
+              {primary}
             </span>
           </div>
         )

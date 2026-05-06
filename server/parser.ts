@@ -239,9 +239,7 @@ function handleToolResult(
 
   // If this was an Agent (subagent) tool call, clear its subagent bubble cluster.
   if (agent.activeSubagentToolIds.has(toolId)) {
-    agent.activeSubagentToolIds.delete(toolId);
-    agent.activeSubagentToolNames.delete(toolId);
-    emit({ type: "subagentClear", id: agent.id, parentToolId: toolId });
+    clearSubagentActivity(agent, toolId, emit);
   }
   // If the subagent never got matched (parent finished before context.jsonl appeared), drop it.
   agent.pendingAgentToolIds = agent.pendingAgentToolIds.filter((id) => id !== toolId);
@@ -289,7 +287,12 @@ export function processSubagentLine(
 
   if (role === "assistant") {
     const toolCalls = Array.isArray(record.tool_calls) ? (record.tool_calls as Array<Record<string, unknown>>) : [];
-    if (toolCalls.length === 0) return;
+    if (toolCalls.length === 0) {
+      const content = Array.isArray(record.content) ? (record.content as Array<Record<string, unknown>>) : [];
+      const hasText = content.some((b) => b.type === "text" || b.type === "think");
+      if (hasText) clearSubagentActivity(agent, parentToolId, emit);
+      return;
+    }
 
     let subTools = agent.activeSubagentToolIds.get(parentToolId);
     if (!subTools) {
@@ -329,6 +332,18 @@ export function processSubagentLine(
     setTimeout(() => {
       emit({ type: "subagentToolDone", id: agent.id, parentToolId, toolId });
     }, TOOL_DONE_DELAY_MS);
+  }
+}
+
+function clearSubagentActivity(agent: TrackedAgent, parentToolId: string, emit: (msg: ServerMessage) => void): void {
+  const hadSubagent = agent.activeSubagentToolIds.has(parentToolId)
+    || agent.activeSubagentToolNames.has(parentToolId)
+    || agent.pendingAgentToolIds.includes(parentToolId);
+  agent.activeSubagentToolIds.delete(parentToolId);
+  agent.activeSubagentToolNames.delete(parentToolId);
+  agent.pendingAgentToolIds = agent.pendingAgentToolIds.filter((id) => id !== parentToolId);
+  if (hadSubagent) {
+    emit({ type: "subagentClear", id: agent.id, parentToolId });
   }
 }
 
