@@ -8,7 +8,7 @@
     "dev:server": "tsx watch server/index.ts",
     "dev:ui": "npm --prefix webview-ui run dev",
     "test": "bun test",
-    "typecheck": "tsc --noEmit && npm --prefix webview-ui exec tsc -b",
+    "typecheck": "tsc --noEmit && npm --prefix webview-ui exec -- tsc -b",
     "test:typecheck": "npm run typecheck",
     "lint": "npm --prefix webview-ui run lint",
     "check": "npm run test && npm run typecheck && npm run lint && npm run build",

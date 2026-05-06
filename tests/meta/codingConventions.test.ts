@@ -12,9 +12,11 @@ describe('coding convention gates', () => {
     expect(pkg.scripts.test).toBe('bun test')
     expect(pkg.scripts.typecheck).toContain('tsc --noEmit')
     expect(pkg.scripts.typecheck).toContain('webview-ui')
-    expect(pkg.scripts['test:typecheck']).toBe('bun run typecheck')
-    expect(pkg.scripts.lint).toContain('webview-ui')
-    expect(pkg.scripts.check).toBe('bun run test && bun run typecheck && bun run lint && bun run build')
+    expect(pkg.scripts['test:typecheck']).toBe('npm run typecheck')
+    expect(pkg.scripts.lint).toBe('npm --prefix webview-ui run lint')
+    expect(pkg.scripts.check).toBe('npm run test && npm run typecheck && npm run lint && npm run build')
+    expect(pkg.scripts.build).toBe('npm run build:server && npm run build:ui')
+    expect(pkg.scripts.start).toBe('node dist/server.js')
   })
 
   test('bun test stays scoped to first-party tests', async () => {
