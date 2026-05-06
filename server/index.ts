@@ -349,7 +349,12 @@ async function sendWireAgentMessage(agentId: number, rawText: string): Promise<v
   if (!text) return;
   lastActivityTime = Date.now();
 
-  const isRunning = ui.turnState === "running" || ui.turnState === "waiting_for_approval" || ui.turnState === "waiting_for_answer";
+  if (ui.turnState === "waiting_for_approval" || ui.turnState === "waiting_for_answer") {
+    appendWireChat(ui, "system", "Respond to the pending request above before sending more messages.", "system");
+    return;
+  }
+
+  const isRunning = ui.turnState === "running";
   appendWireChat(ui, "user", text, isRunning ? "steer" : "prompt");
   emitWireBubble(ui, text, isRunning ? "steer" : "user", 4_000);
 

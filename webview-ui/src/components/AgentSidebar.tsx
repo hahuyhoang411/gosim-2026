@@ -233,11 +233,14 @@ function ChatPanel({
   const [draft, setDraft] = useState('')
   const listRef = useRef<HTMLDivElement>(null)
   const isDirectChatAgent = process?.state === 'ready'
+  const awaitingResponse = turnState === 'waiting_for_approval' || turnState === 'waiting_for_answer'
+  const running = turnState === 'running'
+  const showCancel = running || awaitingResponse
   const canSend = agentId !== null
     && agentId !== undefined
     && draft.trim().length > 0
     && isDirectChatAgent
-  const running = turnState === 'running' || turnState === 'waiting_for_approval' || turnState === 'waiting_for_answer'
+    && !awaitingResponse
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight })
@@ -322,7 +325,7 @@ function ChatPanel({
         ))}
       </div>
 
-      <div style={{ padding: '6px 10px 9px', display: 'grid', gridTemplateColumns: running ? '1fr auto auto' : '1fr auto', gap: 5 }}>
+      <div style={{ padding: '6px 10px 9px', display: 'grid', gridTemplateColumns: showCancel ? '1fr auto auto' : '1fr auto', gap: 5 }}>
         <textarea
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
@@ -332,8 +335,16 @@ function ChatPanel({
               send()
             }
           }}
-          placeholder={!process ? 'Open a New Kimi Agent for direct chat…' : running ? 'Steer the running turn…' : 'Message Kimi…'}
-          disabled={!isDirectChatAgent}
+          placeholder={
+            !process
+              ? 'Open a New Kimi Agent for direct chat…'
+              : awaitingResponse
+                ? 'Respond to the request above first…'
+                : running
+                  ? 'Steer the running turn…'
+                  : 'Message Kimi…'
+          }
+          disabled={!isDirectChatAgent || awaitingResponse}
           rows={2}
           style={{
             minWidth: 0,
@@ -347,7 +358,7 @@ function ChatPanel({
             outline: 'none',
           }}
         />
-        {running && agentId !== null && agentId !== undefined && (
+        {showCancel && agentId !== null && agentId !== undefined && (
           <button style={{ ...miniButtonStyle, color: 'var(--pixel-status-error)' }} onClick={() => onCancelAgentTurn(agentId)}>
             Cancel
           </button>
