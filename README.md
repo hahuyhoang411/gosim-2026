@@ -4,6 +4,27 @@ A standalone web app that visualizes your **[kimi-cli](https://github.com/Moonsh
 
 Each kimi-cli agent becomes a character that walks around, sits at a desk, and visually reflects what it's doing — writing code, running tools, waiting for permission, or idle.
 
+## What It Is
+
+A **virtual research lab** where your kimi-cli AI agents appear as pixel-art characters who work, debate, take coffee breaks, and collaborate in real time.
+
+Each agent gets a desk and a role — researcher, critic, writer, coordinator. They write shared TODOs on a team whiteboard, hold meetings around the conference table, and walk over to your desk when they need you. You watch the whole lab live in your browser, and click any agent to inspect what they're doing.
+
+## Why It Matters
+
+When you run multiple AI agents, you have no idea what they're doing until you dig through logs. Are they stuck? Arguing? Waiting for you to answer a question? You lose oversight and miss the moment to step in.
+
+This project turns invisible background jobs into a **visible team you can watch and guide**. You see agents gather for a meeting, spot a red error badge from across the room, and jump in exactly when human judgment is needed. The sidebar tells you who needs what, so you never have to grep a log file to understand your own agents.
+
+## Tech Stack
+
+| Layer | Stack |
+|---|---|
+| **Backend** | Node.js, TypeScript, Express, WebSocket (`ws`), `chokidar` |
+| **Frontend** | React 19, TypeScript, Vite |
+| **Graphics** | HTML5 Canvas 2D (sprite animation, pathfinding) |
+| **Runtime** | Bun, `tsx`, `esbuild` |
+
 > **Forked from `pixel-agents-standalone` (originally a Claude Code visualizer).**
 > The watcher and parser have been rewritten to read kimi-cli's session transcripts under `~/.kimi/sessions/`. The UI keeps the upstream pixel-office feel, with added kimi session picking, agent detail sidebar, presence states, and subagent timeline support.
 
@@ -19,10 +40,10 @@ Each kimi-cli agent becomes a character that walks around, sits at a desk, and v
 ## Quick Start
 
 ```bash
-npm install
-cd webview-ui && npm install && cd ..
-npm run build
-npm start
+bun install
+bun install --cwd webview-ui
+bun run build
+bun run start
 ```
 
 Open `http://localhost:3456` in your browser. The server scans `~/.kimi/sessions/` for sessions modified in the last 10 minutes and shows agents in real time.
@@ -52,7 +73,7 @@ Edit `scripts/kimi-hook.sh` and set `PIXEL_AGENTS_DIR` to wherever you cloned th
 ## Development
 
 ```bash
-npm run dev
+bun run dev
 ```
 
 Runs the Express server (hot-reload via `tsx watch`) and Vite dev server concurrently.
@@ -77,7 +98,7 @@ Runs the Express server (hot-reload via `tsx watch`) and Vite dev server concurr
 Same as upstream. The built-in layout uses basic furniture; for the full 452-piece catalog, purchase the [Office Interior Tileset](https://donarg.itch.io/office-interior-tileset-16x16) by Donarg ($2 on itch.io), place it at `assets/office_tileset_16x16.png`, and run:
 
 ```bash
-npm run extract-furniture
+bun run extract-furniture
 ```
 
 ## Credits
