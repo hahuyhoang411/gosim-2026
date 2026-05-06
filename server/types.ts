@@ -43,6 +43,12 @@ export type AgentChatRole = "user" | "assistant" | "thinking" | "system" | "tool
 export type AgentTurnState = "idle" | "running" | "waiting_for_approval" | "waiting_for_answer" | "cancelled" | "error";
 export type AgentProcessState = "starting" | "ready" | "exited" | "crashed";
 export type AgentBubbleKind = "user" | "assistant" | "system" | "steer" | "error";
+export type AgentTodoStatus = "pending" | "in_progress" | "done";
+
+export interface AgentTodoItem {
+  title: string;
+  status: AgentTodoStatus;
+}
 
 export interface AgentChatEntry {
   id: string;
@@ -77,6 +83,7 @@ export type ServerMessage =
   | { type: "agentProcessState"; agentId: number; state: AgentProcessState; pid?: number; error?: string }
   | { type: "agentRequest"; agentId: number; request: AgentRequestMessage }
   | { type: "agentRequestResolved"; agentId: number; requestId: string }
+  | { type: "agentTodoList"; agentId: number; todos: AgentTodoItem[] }
   | { type: "agentToolPermission"; id: number }
   | { type: "agentToolPermissionClear"; id: number }
   | { type: "subagentToolStart"; id: number; parentToolId: string; toolId: string; status: string }

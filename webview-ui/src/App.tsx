@@ -16,6 +16,7 @@ import { BottomToolbar } from './components/BottomToolbar.js'
 import type { SpawnKimiAgentInput } from './components/AgentSpawnDialog.js'
 import { DebugView } from './components/DebugView.js'
 import { AgentSidebar } from './components/AgentSidebar.js'
+import { BlackboardPanel } from './components/BlackboardPanel.js'
 
 // Game state lives outside React — updated imperatively by message handlers
 const officeStateRef = { current: null as OfficeState | null }
@@ -133,6 +134,7 @@ function App() {
     agentTurnStates,
     agentProcessStates,
     agentRequests,
+    agentTodoLists,
     subagentTools,
     subagentCharacters,
     eventLog,
@@ -372,6 +374,16 @@ function App() {
         panRef={editor.panRef}
         onCloseAgent={handleCloseAgent}
       />
+
+      {!isDebugMode && (
+        <BlackboardPanel
+          officeState={officeState}
+          agents={agents}
+          agentTodoLists={agentTodoLists}
+          selectedAgent={selectedAgent}
+          onSelectAgent={handleSelectAgent}
+        />
+      )}
 
       {!isDebugMode && (
         <AgentSidebar

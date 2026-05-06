@@ -4,6 +4,7 @@ import { basename, join } from "path";
 import { randomUUID } from "crypto";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
+import type { AgentTodoItem, AgentTodoStatus } from "./types.js";
 
 export interface KimiWireOptions {
   executable: string;
@@ -163,6 +164,26 @@ function parseToolArguments(raw: unknown): Record<string, unknown> {
   }
 }
 
+const TODO_STATUSES = new Set<AgentTodoStatus>(["pending", "in_progress", "done"]);
+
+function normalizeTodoStatus(value: unknown): AgentTodoStatus {
+  return typeof value === "string" && TODO_STATUSES.has(value as AgentTodoStatus)
+    ? value as AgentTodoStatus
+    : "pending";
+}
+
+function normalizeTodoItems(value: unknown): AgentTodoItem[] {
+  if (!Array.isArray(value)) return [];
+  const todos: AgentTodoItem[] = [];
+  for (const item of value) {
+    const record = asRecord(item);
+    const title = typeof record.title === "string" ? record.title.trim() : "";
+    if (!title) continue;
+    todos.push({ title, status: normalizeTodoStatus(record.status) });
+  }
+  return todos;
+}
+
 function oneLine(value: unknown, maxLen: number): string {
   const text = typeof value === "string" ? value : "";
   const normalized = text.replace(/\s+/g, " ").trim();
@@ -192,6 +213,23 @@ export function contentInputText(input: unknown): string {
     if (record.type === "think" && typeof record.think === "string") pieces.push(record.think);
   }
   return pieces.join("\n").trim();
+}
+
+export function extractWireTodoList(payload: Record<string, unknown>): AgentTodoItem[] | null {
+  const fn = asRecord(payload.function);
+  if (fn.name === "SetTodoList") {
+    return normalizeTodoItems(parseToolArguments(fn.arguments).todos);
+  }
+
+  const returnValue = asRecord(payload.return_value);
+  const display = Array.isArray(returnValue.display) ? returnValue.display : [];
+  for (const block of display) {
+    const record = asRecord(block);
+    if (record.type !== "todo") continue;
+    return normalizeTodoItems(record.items ?? record.todos);
+  }
+
+  return null;
 }
 
 export function formatWireToolStatus(payload: Record<string, unknown>): { toolId: string; toolName: string; status: string } | null {
@@ -246,6 +284,9 @@ export function formatWireToolStatus(payload: Record<string, unknown>): { toolId
       break;
     case "ExitPlanMode":
       status = "Submitting plan";
+      break;
+    case "SetTodoList":
+      status = "Updating TODO list";
       break;
     default:
       status = `Using ${toolName}`;
