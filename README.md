@@ -4,6 +4,8 @@ A standalone web app that visualizes your **[kimi-cli](https://github.com/Moonsh
 
 Each kimi-cli agent becomes a character that walks around, sits at a desk, and visually reflects what it's doing — writing code, running tools, waiting for permission, or idle.
 
+[▶️ Watch the demo](./WhatsApp%20Video%202026-05-06%20at%2012.02.30.mp4)
+
 ## What It Is
 
 A **virtual research lab** where your kimi-cli AI agents appear as pixel-art characters who work, debate, take coffee breaks, and collaborate in real time.
