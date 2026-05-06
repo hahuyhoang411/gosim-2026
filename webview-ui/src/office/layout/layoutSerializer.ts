@@ -344,6 +344,8 @@ export function createDefaultLayout(): OfficeLayout {
     // ── Kitchen / Break Room (decorative, 0 seats) ──
     { uid: 'break-cooler', type: FurnitureType.COOLER, col: 18, row: 20 },
     { uid: 'break-counter', type: FurnitureType.DESK, col: 14, row: 20 },
+    { uid: 'break-chair-1', type: FurnitureType.CHAIR, col: 16, row: 20 },
+    { uid: 'break-chair-2', type: FurnitureType.CHAIR, col: 16, row: 21 },
     { uid: 'break-plant', type: FurnitureType.PLANT, col: 14, row: 25 },
     { uid: 'break-lamp', type: FurnitureType.LAMP, col: 14, row: 22 },
   ]
