@@ -25,9 +25,6 @@ This project turns invisible background jobs into a **visible team you can watch
 | **Graphics** | HTML5 Canvas 2D (sprite animation, pathfinding) |
 | **Runtime** | Bun, `tsx`, `esbuild` |
 
-> **Forked from `pixel-agents-standalone` (originally a Claude Code visualizer).**
-> The watcher and parser have been rewritten to read kimi-cli's session transcripts under `~/.kimi/sessions/`. The UI keeps the upstream pixel-office feel, with added kimi session picking, agent detail sidebar, presence states, and subagent timeline support.
-
 ## What's Different from the Claude Code version
 
 | Claude Code version | This version (kimi-cli) |
