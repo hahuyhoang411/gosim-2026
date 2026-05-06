@@ -10,6 +10,7 @@ import { setCharacterTemplates } from '../office/sprites/spriteData.js'
 import { deriveAgentPresence } from '../office/presence.js'
 import { vscode } from '../vscodeApi.js'
 import { playDoneSound, setSoundEnabled } from '../notificationSound.js'
+import { upsertAgentChatEntry } from './agentChats.js'
 
 export interface SubagentCharacter {
   id: number
@@ -141,6 +142,7 @@ export function useExtensionMessages(
   const eventSeqRef = useRef(0)
   const agentToolsRef = useRef(agentTools)
   const agentStatusesRef = useRef(agentStatuses)
+  const agentChatsRef = useRef(agentChats)
   const subagentToolsRef = useRef(subagentTools)
 
   useEffect(() => {
@@ -150,6 +152,10 @@ export function useExtensionMessages(
   useEffect(() => {
     agentStatusesRef.current = agentStatuses
   }, [agentStatuses])
+
+  useEffect(() => {
+    agentChatsRef.current = agentChats
+  }, [agentChats])
 
   useEffect(() => {
     subagentToolsRef.current = subagentTools
@@ -408,12 +414,18 @@ export function useExtensionMessages(
       } else if (msg.type === 'agentChatEntry') {
         const id = msg.agentId as number
         const entry = msg.entry as AgentChatEntry
+        const currentList = agentChatsRef.current[id] || []
+        const isNewEntry = !currentList.some((item) => item.id === entry.id)
+        const nextList = upsertAgentChatEntry(currentList, entry)
+        if (nextList !== currentList) {
+          agentChatsRef.current = { ...agentChatsRef.current, [id]: nextList }
+        }
         setAgentChats((prev) => {
           const list = prev[id] || []
-          if (list.some((item) => item.id === entry.id)) return prev
-          return { ...prev, [id]: [...list, entry] }
+          const updated = upsertAgentChatEntry(list, entry)
+          return updated === list ? prev : { ...prev, [id]: updated }
         })
-        if (entry.role === 'user' || entry.role === 'assistant') {
+        if (isNewEntry && (entry.role === 'user' || entry.role === 'assistant')) {
           appendEvent({
             type: 'agentChatEntry',
             agentId: id,
