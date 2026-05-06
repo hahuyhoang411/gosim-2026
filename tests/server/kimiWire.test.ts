@@ -5,6 +5,7 @@ import { join } from "path";
 import {
   KimiWireSession,
   contentPartText,
+  extractWireTodoList,
   formatWireToolStatus,
   requestDisplayText,
   type WireEventParams,
@@ -247,6 +248,12 @@ describe("Kimi Wire transport", () => {
       })?.status,
     ).toBe("Running: echo hello");
     expect(
+      formatWireToolStatus({
+        id: "todo-tool",
+        function: { name: "SetTodoList", arguments: JSON.stringify({ todos: [] }) },
+      })?.status,
+    ).toBe("Updating TODO list");
+    expect(
       requestDisplayText({
         type: "ApprovalRequest",
         payload: { description: "Run shell command" },
@@ -263,6 +270,74 @@ describe("Kimi Wire transport", () => {
         },
       }),
     ).toBe("Lang: Which language should I use? (+1 more)");
+  });
+
+  test("extracts normalized TODOs from SetTodoList ToolCall arguments", () => {
+    expect(
+      extractWireTodoList({
+        id: "todo-tool",
+        function: {
+          name: "SetTodoList",
+          arguments: JSON.stringify({
+            todos: [
+              { title: "Map the debate scenario", status: "done" },
+              { title: "Wire Kimi todo events", status: "in_progress" },
+              { title: "Dogfood blackboard", status: "pending" },
+            ],
+          }),
+        },
+      }),
+    ).toEqual([
+      { title: "Map the debate scenario", status: "done" },
+      { title: "Wire Kimi todo events", status: "in_progress" },
+      { title: "Dogfood blackboard", status: "pending" },
+    ]);
+  });
+
+  test("extracts TODOs from ToolResult todo display blocks", () => {
+    expect(
+      extractWireTodoList({
+        tool_call_id: "todo-tool",
+        return_value: {
+          is_error: false,
+          display: [
+            {
+              type: "todo",
+              items: [
+                { title: "Summarize roles", status: "done" },
+                { title: "Render board", status: "in_progress" },
+              ],
+            },
+          ],
+        },
+      }),
+    ).toEqual([
+      { title: "Summarize roles", status: "done" },
+      { title: "Render board", status: "in_progress" },
+    ]);
+  });
+
+  test("drops blank TODO titles and defaults invalid statuses to pending", () => {
+    expect(
+      extractWireTodoList({
+        id: "todo-tool",
+        function: {
+          name: "SetTodoList",
+          arguments: {
+            todos: [
+              { title: "  Keep this  ", status: "blocked" },
+              { title: "   ", status: "done" },
+              { title: "Already done", status: "done" },
+            ],
+          },
+        },
+      }),
+    ).toEqual([
+      { title: "Keep this", status: "pending" },
+      { title: "Already done", status: "done" },
+    ]);
+
+    expect(extractWireTodoList({ function: { name: "Read", arguments: "{}" } })).toBeNull();
   });
 
   test("initializes, receives assistant text, and accepts steer during an active turn", async () => {

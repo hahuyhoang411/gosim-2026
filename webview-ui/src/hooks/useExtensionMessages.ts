@@ -10,6 +10,7 @@ import { setCharacterTemplates } from '../office/sprites/spriteData.js'
 import { deriveAgentPresence } from '../office/presence.js'
 import { vscode } from '../vscodeApi.js'
 import { playDoneSound, setSoundEnabled } from '../notificationSound.js'
+import { normalizeAgentTodos, summarizeTodos, type AgentTodoItem } from '../components/blackboardModel.js'
 
 export interface SubagentCharacter {
   id: number
@@ -87,6 +88,7 @@ export interface ExtensionMessageState {
   agentTurnStates: Record<number, AgentTurnState>
   agentProcessStates: Record<number, AgentProcessInfo>
   agentRequests: Record<number, AgentRequestMessage[]>
+  agentTodoLists: Record<number, AgentTodoItem[]>
   subagentTools: Record<number, Record<string, ToolActivity[]>>
   subagentCharacters: SubagentCharacter[]
   eventLog: AgentTimelineEvent[]
@@ -128,6 +130,7 @@ export function useExtensionMessages(
   const [agentTurnStates, setAgentTurnStates] = useState<Record<number, AgentTurnState>>({})
   const [agentProcessStates, setAgentProcessStates] = useState<Record<number, AgentProcessInfo>>({})
   const [agentRequests, setAgentRequests] = useState<Record<number, AgentRequestMessage[]>>({})
+  const [agentTodoLists, setAgentTodoLists] = useState<Record<number, AgentTodoItem[]>>({})
   const [subagentTools, setSubagentTools] = useState<Record<number, Record<string, ToolActivity[]>>>({})
   const [subagentCharacters, setSubagentCharacters] = useState<SubagentCharacter[]>([])
   const [eventLog, setEventLog] = useState<AgentTimelineEvent[]>([])
@@ -279,6 +282,12 @@ export function useExtensionMessages(
           delete next[id]
           return next
         })
+        setAgentTodoLists((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
         setSubagentTools((prev) => {
           if (!(id in prev)) return prev
           const next = { ...prev }
@@ -307,6 +316,26 @@ export function useExtensionMessages(
             }
           }
           return merged.sort((a, b) => a - b)
+        })
+      } else if (msg.type === 'agentTodoList') {
+        const id = msg.agentId as number
+        const todos = normalizeAgentTodos(msg.todos)
+        setAgentTodoLists((prev) => {
+          const next = { ...prev }
+          if (todos.length === 0) {
+            delete next[id]
+          } else {
+            next[id] = todos
+          }
+          return next
+        })
+        const summary = summarizeTodos(todos)
+        appendEvent({
+          type: 'agentTodoList',
+          agentId: id,
+          title: 'TODO updated',
+          detail: todos.length > 0 ? `${summary.done}/${summary.total} done` : 'cleared',
+          presence: deriveAgentPresence(id, agentToolsRef.current, agentStatusesRef.current, subagentToolsRef.current),
         })
       } else if (msg.type === 'agentToolStart') {
         const id = msg.id as number
@@ -732,6 +761,7 @@ export function useExtensionMessages(
     agentTurnStates,
     agentProcessStates,
     agentRequests,
+    agentTodoLists,
     subagentTools,
     subagentCharacters,
     eventLog,

@@ -14,6 +14,7 @@ import {
   KimiWireSession,
   contentInputText,
   contentPartText,
+  extractWireTodoList,
   formatWireToolStatus,
   requestDisplayText,
   type WireEventParams,
@@ -41,6 +42,7 @@ import type {
   AgentBubbleKind,
   AgentChatRole,
   AgentProcessState,
+  AgentTodoItem,
   AgentTurnState,
   ClientMessage,
   ServerMessage,
@@ -69,6 +71,7 @@ interface UiWireAgent {
   processState: AgentProcessState;
   runningPrompt: Promise<unknown> | null;
   isReplaying: boolean;
+  todoList: AgentTodoItem[];
 }
 
 const wireAgents = new Map<number, UiWireAgent>();
@@ -211,6 +214,17 @@ function emitWireBubble(ui: UiWireAgent, text: string, kind: AgentBubbleKind, tt
   broadcast({ type: "agentBubble", agentId: ui.agent.id, text, kind, ttlMs });
 }
 
+function updateWireTodoList(ui: UiWireAgent, todos: AgentTodoItem[]): void {
+  ui.todoList = todos;
+  broadcast({ type: "agentTodoList", agentId: ui.agent.id, todos });
+}
+
+function updateWireTodoListFromPayload(ui: UiWireAgent, payload: Record<string, unknown>): void {
+  const todos = extractWireTodoList(payload);
+  if (todos === null) return;
+  updateWireTodoList(ui, todos);
+}
+
 function launchKimi(folderPath: unknown, sessionId?: string): void {
   const cwd = resolveLaunchCwd(folderPath);
   const modeArgs = sessionId
@@ -276,6 +290,7 @@ function spawnUiKimiAgent(msg: Extract<ClientMessage, { type: "spawnKimiAgent" }
     processState: "starting",
     runningPrompt: null,
     isReplaying: false,
+    todoList: [],
   };
   wireAgents.set(id, ui);
   bindWireAgent(ui);
@@ -480,6 +495,7 @@ function handleWireEvent(ui: UiWireAgent, event: WireEventParams): void {
       break;
     }
     case "ToolCall": {
+      updateWireTodoListFromPayload(ui, payload);
       const tool = formatWireToolStatus(payload);
       if (!tool) return;
       ui.agent.activeTools.set(tool.toolId, { toolId: tool.toolId, toolName: tool.toolName, status: tool.status });
@@ -489,6 +505,7 @@ function handleWireEvent(ui: UiWireAgent, event: WireEventParams): void {
       break;
     }
     case "ToolResult": {
+      updateWireTodoListFromPayload(ui, payload);
       const toolId = typeof payload.tool_call_id === "string" ? payload.tool_call_id : "";
       if (!toolId) return;
       ui.agent.activeTools.delete(toolId);
@@ -528,6 +545,10 @@ function handleWireEvent(ui: UiWireAgent, event: WireEventParams): void {
 }
 
 function handleReplayWireEvent(ui: UiWireAgent, event: WireEventParams): void {
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  if (event.type === "ToolCall" || event.type === "ToolResult") {
+    updateWireTodoListFromPayload(ui, payload);
+  }
   const entry = applyReplayWireEvent(ui.conversation, event);
   if (entry) {
     broadcast({ type: "agentChatEntry", agentId: ui.agent.id, entry });
@@ -768,6 +789,9 @@ function sendInitialData(ws: WebSocket): void {
   for (const ui of wireAgents.values()) {
     ws.send(JSON.stringify({ type: "agentProcessState", agentId: ui.agent.id, state: ui.processState, pid: ui.wire.pid }));
     ws.send(JSON.stringify({ type: "agentTurnState", agentId: ui.agent.id, turnState: ui.turnState }));
+    if (ui.todoList.length > 0) {
+      ws.send(JSON.stringify({ type: "agentTodoList", agentId: ui.agent.id, todos: ui.todoList }));
+    }
     const snapshot = wireConversationSnapshot(ui.conversation);
     for (const entry of snapshot.entries) {
       ws.send(JSON.stringify({ type: "agentChatEntry", agentId: ui.agent.id, entry }));
