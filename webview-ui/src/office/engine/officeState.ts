@@ -335,7 +335,7 @@ export class OfficeState {
   /** Assign and move an agent to the best available seat for a semantic room. */
   moveAgentToRoom(agentId: number, room: AgentRoomKind): boolean {
     const ch = this.characters.get(agentId)
-    if (!ch || ch.isSubagent) return false
+    if (!ch) return false
     const seatId = chooseSeatForRoom(room, this.seats, ch.seatId)
     if (!seatId) return false
     if (ch.seatId === seatId) {

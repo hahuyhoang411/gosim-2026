@@ -16,6 +16,7 @@ import {
   toggleMultiSelectAnswer,
   type QuestionDraftValue,
 } from './agentRequestModel.js'
+import { coalesceVisibleAgentChatEntries } from '../hooks/agentChats.js'
 
 interface AgentSidebarProps {
   officeState: OfficeState
@@ -390,11 +391,12 @@ function ChatPanel({
     && draft.trim().length > 0
     && isDirectChatAgent
   const running = turnState === 'running' || turnState === 'waiting_for_approval' || turnState === 'waiting_for_answer'
-  const lastMessage = messages[messages.length - 1]
+  const visibleMessages = coalesceVisibleAgentChatEntries(messages)
+  const lastMessage = visibleMessages[visibleMessages.length - 1]
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight })
-  }, [messages.length, lastMessage?.id, lastMessage?.text, requests.length, agentId])
+  }, [visibleMessages.length, lastMessage?.id, lastMessage?.text, requests.length, agentId])
 
   const send = () => {
     if (!canSend || agentId === null || agentId === undefined) return
@@ -432,7 +434,7 @@ function ChatPanel({
           <div style={{ fontSize: 19, color: 'var(--pixel-text-dim)' }}>
             {agentId === null || agentId === undefined ? 'Select an agent to chat.' : 'No chat yet.'}
           </div>
-        ) : messages.map((message) => (
+        ) : visibleMessages.map((message) => (
           <div
             key={message.id}
             style={{

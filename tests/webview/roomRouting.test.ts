@@ -2,10 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { Direction, type Seat } from "../../webview-ui/src/office/types.js";
 import { OfficeState } from "../../webview-ui/src/office/engine/officeState.js";
 import {
+  ROOM_ANCHORS,
   chooseSeatForRoom,
+  reportRoomForSubagent,
   roomForSeatId,
   roomForToolStatus,
-  roomsForScenario,
 } from "../../webview-ui/src/office/roomRouting.js";
 
 function seat(uid: string, assigned = false): Seat {
@@ -17,7 +18,7 @@ describe("semantic room routing", () => {
     expect(roomForSeatId("conf-chair-1")).toBe("debate");
     expect(roomForSeatId("off2-chair")).toBe("research");
     expect(roomForSeatId("off3-chair-a")).toBe("coding");
-    expect(roomForSeatId("main-chair-1")).toBe("general");
+    expect(roomForSeatId("main-chair-1")).toBe("brainstorm");
     expect(roomForSeatId("break-chair-1")).toBe("idle");
   });
 
@@ -40,17 +41,19 @@ describe("semantic room routing", () => {
     expect(chooseSeatForRoom("research", seats, null)).toBe("off1-chair-a");
   });
 
-  test("routes web search statuses to the research room", () => {
+  test("routes Kimi tool status to semantic work rooms", () => {
     expect(roomForToolStatus("Searching the web")).toBe("research");
     expect(roomForToolStatus("Fetching web content")).toBe("research");
-    expect(roomForToolStatus("Running: bun test")).toBeNull();
+    expect(roomForToolStatus("Running: bun test")).toBe("coding");
+    expect(roomForToolStatus("Editing App.tsx")).toBe("coding");
+    expect(roomForToolStatus("Subtask: compare the references")).toBe("brainstorm");
+    expect(roomForToolStatus("Waiting for your answer")).toBeNull();
   });
 
-  test("maps scenario presets to room assignments", () => {
-    expect(roomsForScenario("debate", [1, 2, 3])).toEqual({ 1: "debate", 2: "debate", 3: "debate" });
-    expect(roomsForScenario("brainstorm", [1, 2])).toEqual({ 1: "brainstorm", 2: "brainstorm" });
-    expect(roomsForScenario("search_squad", [1, 2])).toEqual({ 1: "research", 2: "research" });
-    expect(roomsForScenario("solo_research", [1, 2])).toEqual({ 1: "research" });
+  test("keeps dedicated room anchors distinct for in-world labels and boards", () => {
+    expect(ROOM_ANCHORS.research).not.toEqual(ROOM_ANCHORS.debate);
+    expect(ROOM_ANCHORS.brainstorm).not.toEqual(ROOM_ANCHORS.debate);
+    expect(reportRoomForSubagent()).toBe("debate");
   });
 
   test("OfficeState moves an agent to a semantic room seat", () => {
@@ -59,6 +62,27 @@ describe("semantic room routing", () => {
 
     expect(office.moveAgentToRoom(1, "research")).toBe(true);
     expect(roomForSeatId(office.characters.get(1)?.seatId ?? "")).toBe("research");
+  });
+
+  test("OfficeState can move a subagent to an action room", () => {
+    const office = new OfficeState();
+    office.addAgent(1);
+    const subagentId = office.addSubagent(1, "task-1");
+
+    expect(office.moveAgentToRoom(subagentId, "research")).toBe(true);
+    expect(roomForSeatId(office.characters.get(subagentId)?.seatId ?? "")).toBe("research");
+  });
+
+  test("inactive subagents can still be sent back to the PI report room", () => {
+    const office = new OfficeState();
+    office.addAgent(1);
+    const subagentId = office.addSubagent(1, "task-1");
+    office.moveAgentToRoom(subagentId, "research");
+
+    office.setAgentActive(subagentId, false);
+    expect(office.moveAgentToRoom(subagentId, reportRoomForSubagent())).toBe(true);
+
+    expect(roomForSeatId(office.characters.get(subagentId)?.seatId ?? "")).toBe("debate");
   });
 
   test("default layout exposes break-room seats for idle routing", () => {
