@@ -70,6 +70,26 @@ function handle(line) {
     return;
   }
 
+  if (msg.method === "replay") {
+    send({ jsonrpc: "2.0", method: "event", params: { type: "TurnBegin", payload: { user_input: "replayed prompt" } } });
+    send({ jsonrpc: "2.0", method: "event", params: { type: "ContentPart", payload: { type: "text", text: "replayed answer" } } });
+    send({
+      jsonrpc: "2.0",
+      method: "request",
+      id: "rpc-replay-question",
+      params: {
+        type: "QuestionRequest",
+        payload: {
+          id: "question-replay-1",
+          questions: [{ question: "Replayed question?", options: [{ label: "Yes" }] }],
+        },
+      },
+    });
+    send({ jsonrpc: "2.0", method: "event", params: { type: "TurnEnd", payload: {} } });
+    send({ jsonrpc: "2.0", id: msg.id, result: { status: "finished", events: 3, requests: 1 } });
+    return;
+  }
+
   if (msg.method === "steer") {
     send({ jsonrpc: "2.0", method: "event", params: { type: "SteerInput", payload: { user_input: msg.params.user_input } } });
     send({ jsonrpc: "2.0", id: msg.id, result: { status: "steered" } });
@@ -263,6 +283,23 @@ describe("Kimi Wire transport", () => {
       payload: { type: "text", text: "hello from fake wire" },
     });
     expect(events.some((event) => event.type === "SteerInput")).toBe(true);
+    session.dispose();
+  });
+
+  test("replays historical Wire events and requests without requiring client responses", async () => {
+    const session = new KimiWireSession({ executable: createFakeKimiWireExecutable(), cwd: process.cwd() });
+    const events: WireEventParams[] = [];
+    const requests: WireRequestEnvelope[] = [];
+    session.on("wireEvent", (event: WireEventParams) => events.push(event));
+    session.on("wireRequest", (request: WireRequestEnvelope) => requests.push(request));
+
+    await session.initialize();
+    const result = await session.replay() as { status?: string; events?: number; requests?: number };
+
+    expect(result).toEqual({ status: "finished", events: 3, requests: 1 });
+    expect(events.map((event) => event.type)).toEqual(["TurnBegin", "ContentPart", "TurnEnd"]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].params.type).toBe("QuestionRequest");
     session.dispose();
   });
 

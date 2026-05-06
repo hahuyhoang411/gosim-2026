@@ -20,6 +20,16 @@ import {
   type WireRequestEnvelope,
 } from "./kimiWire.js";
 import {
+  applyReplayWireEvent,
+  applyReplayWireRequest,
+  appendWireConversationEntry,
+  createWireConversationState,
+  registerWireRequest,
+  resolveWireRequest,
+  wireConversationSnapshot,
+  type WireConversationState,
+} from "./wireConversation.js";
+import {
   loadCharacterSprites,
   loadWallTiles,
   loadFloorTiles,
@@ -50,22 +60,15 @@ let nextChatEntryId = 1;
 const clients = new Set<WebSocket>();
 let lastActivityTime = Date.now();
 
-interface PendingWireRequest {
-  rpcId: string;
-  requestId: string;
-  requestType: string;
-  payload: Record<string, unknown>;
-}
-
 interface UiWireAgent {
   key: string;
   agent: TrackedAgent;
   wire: KimiWireSession;
-  conversation: AgentChatEntry[];
-  pendingRequests: Map<string, PendingWireRequest>;
+  conversation: WireConversationState;
   turnState: AgentTurnState;
   processState: AgentProcessState;
   runningPrompt: Promise<unknown> | null;
+  isReplaying: boolean;
 }
 
 const wireAgents = new Map<number, UiWireAgent>();
@@ -193,16 +196,13 @@ function appendWireChat(
   role: AgentChatRole,
   text: string,
   source: AgentChatEntry["source"] = "wire",
-): AgentChatEntry {
-  const entry: AgentChatEntry = {
-    id: `${Date.now()}-${nextChatEntryId++}`,
-    agentId: ui.agent.id,
-    role,
-    text,
-    createdAt: Date.now(),
-    source,
-  };
-  ui.conversation.push(entry);
+): AgentChatEntry | null {
+  const now = Date.now();
+  const entry = appendWireConversationEntry(ui.conversation, role, text, source, {
+    id: `${now}-${nextChatEntryId++}`,
+    createdAt: now,
+  });
+  if (!entry) return null;
   broadcast({ type: "agentChatEntry", agentId: ui.agent.id, entry });
   return entry;
 }
@@ -271,11 +271,11 @@ function spawnUiKimiAgent(msg: Extract<ClientMessage, { type: "spawnKimiAgent" }
     key,
     agent,
     wire,
-    conversation: [],
-    pendingRequests: new Map(),
+    conversation: createWireConversationState(id),
     turnState: "idle",
     processState: "starting",
     runningPrompt: null,
+    isReplaying: false,
   };
   wireAgents.set(id, ui);
   bindWireAgent(ui);
@@ -312,8 +312,20 @@ function spawnUiKimiAgent(msg: Extract<ClientMessage, { type: "spawnKimiAgent" }
 }
 
 function bindWireAgent(ui: UiWireAgent): void {
-  ui.wire.on("wireEvent", (event: WireEventParams) => handleWireEvent(ui, event));
-  ui.wire.on("wireRequest", (request: WireRequestEnvelope) => handleWireRequest(ui, request));
+  ui.wire.on("wireEvent", (event: WireEventParams) => {
+    if (ui.isReplaying) {
+      handleReplayWireEvent(ui, event);
+    } else {
+      handleWireEvent(ui, event);
+    }
+  });
+  ui.wire.on("wireRequest", (request: WireRequestEnvelope) => {
+    if (ui.isReplaying) {
+      handleReplayWireRequest(ui, request);
+    } else {
+      handleWireRequest(ui, request);
+    }
+  });
   ui.wire.on("stderr", (chunk: string) => {
     const text = chunk.replace(/\s+/g, " ").trim();
     if (text && /\b(error|failed|traceback|panic)\b/i.test(text)) {
@@ -340,6 +352,15 @@ function bindWireAgent(ui: UiWireAgent): void {
     appendWireChat(ui, "system", err.message, "system");
     emitWireBubble(ui, err.message, "error", 8_000);
   });
+}
+
+async function replayWireAgentHistory(ui: UiWireAgent): Promise<unknown> {
+  ui.isReplaying = true;
+  try {
+    return await ui.wire.replay();
+  } finally {
+    ui.isReplaying = false;
+  }
 }
 
 async function sendWireAgentMessage(agentId: number, rawText: string): Promise<void> {
@@ -478,7 +499,7 @@ function handleWireEvent(ui: UiWireAgent, event: WireEventParams): void {
     case "ApprovalResponse": {
       const requestId = typeof payload.request_id === "string" ? payload.request_id : "";
       if (requestId) {
-        ui.pendingRequests.delete(requestId);
+        resolveWireRequest(ui.conversation, requestId);
         broadcast({ type: "agentRequestResolved", agentId: ui.agent.id, requestId });
       }
       break;
@@ -503,6 +524,20 @@ function handleWireEvent(ui: UiWireAgent, event: WireEventParams): void {
     }
     default:
       break;
+  }
+}
+
+function handleReplayWireEvent(ui: UiWireAgent, event: WireEventParams): void {
+  const entry = applyReplayWireEvent(ui.conversation, event);
+  if (entry) {
+    broadcast({ type: "agentChatEntry", agentId: ui.agent.id, entry });
+  }
+}
+
+function handleReplayWireRequest(ui: UiWireAgent, request: WireRequestEnvelope): void {
+  const entry = applyReplayWireRequest(ui.conversation, request);
+  if (entry) {
+    broadcast({ type: "agentChatEntry", agentId: ui.agent.id, entry });
   }
 }
 
@@ -535,15 +570,12 @@ function handleWireRequest(ui: UiWireAgent, request: WireRequestEnvelope): void 
     return;
   }
 
-  ui.pendingRequests.set(requestId, {
-    rpcId: request.rpcId,
-    requestId,
-    requestType,
-    payload,
-  });
+  const stored = registerWireRequest(ui.conversation, request);
+  if (stored.entry) {
+    broadcast({ type: "agentChatEntry", agentId: ui.agent.id, entry: stored.entry });
+  }
   broadcast({ type: "agentRequest", agentId: ui.agent.id, request: { requestId, requestType, payload } });
   const displayText = requestDisplayText({ type: requestType, payload });
-  appendWireChat(ui, "system", displayText, "request");
 
   if (requestType === "ApprovalRequest") {
     setWireTurnState(ui, "waiting_for_approval");
@@ -559,7 +591,7 @@ function respondToWireApproval(
   msg: Extract<ClientMessage, { type: "respondApproval" }>,
 ): void {
   const ui = wireAgents.get(msg.agentId);
-  const pending = ui?.pendingRequests.get(msg.requestId);
+  const pending = ui?.conversation.pendingRequests.get(msg.requestId);
   if (!ui || !pending) return;
   const result: Record<string, unknown> = {
     request_id: msg.requestId,
@@ -568,7 +600,7 @@ function respondToWireApproval(
   const feedback = typeof msg.feedback === "string" ? msg.feedback.trim() : "";
   if (feedback) result.feedback = feedback;
   ui.wire.respond(pending.rpcId, result);
-  ui.pendingRequests.delete(msg.requestId);
+  resolveWireRequest(ui.conversation, msg.requestId);
   broadcast({ type: "agentRequestResolved", agentId: ui.agent.id, requestId: msg.requestId });
   broadcast({ type: "agentToolPermissionClear", id: ui.agent.id });
   setWireTurnState(ui, "running");
@@ -578,13 +610,13 @@ function respondToWireQuestion(
   msg: Extract<ClientMessage, { type: "respondQuestion" }>,
 ): void {
   const ui = wireAgents.get(msg.agentId);
-  const pending = ui?.pendingRequests.get(msg.requestId);
+  const pending = ui?.conversation.pendingRequests.get(msg.requestId);
   if (!ui || !pending) return;
   ui.wire.respond(pending.rpcId, {
     request_id: msg.requestId,
     answers: msg.answers,
   });
-  ui.pendingRequests.delete(msg.requestId);
+  resolveWireRequest(ui.conversation, msg.requestId);
   broadcast({ type: "agentRequestResolved", agentId: ui.agent.id, requestId: msg.requestId });
   setWireTurnState(ui, "running");
 }
@@ -736,18 +768,15 @@ function sendInitialData(ws: WebSocket): void {
   for (const ui of wireAgents.values()) {
     ws.send(JSON.stringify({ type: "agentProcessState", agentId: ui.agent.id, state: ui.processState, pid: ui.wire.pid }));
     ws.send(JSON.stringify({ type: "agentTurnState", agentId: ui.agent.id, turnState: ui.turnState }));
-    for (const entry of ui.conversation) {
+    const snapshot = wireConversationSnapshot(ui.conversation);
+    for (const entry of snapshot.entries) {
       ws.send(JSON.stringify({ type: "agentChatEntry", agentId: ui.agent.id, entry }));
     }
-    for (const pending of ui.pendingRequests.values()) {
+    for (const pending of snapshot.requests) {
       ws.send(JSON.stringify({
         type: "agentRequest",
         agentId: ui.agent.id,
-        request: {
-          requestId: pending.requestId,
-          requestType: pending.requestType,
-          payload: pending.payload,
-        },
+        request: pending,
       }));
     }
   }

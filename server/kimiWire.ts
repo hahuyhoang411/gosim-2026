@@ -342,6 +342,10 @@ export class KimiWireSession extends EventEmitter {
     return this.request("cancel", {});
   }
 
+  replay(): Promise<unknown> {
+    return this.request("replay", {});
+  }
+
   setPlanMode(enabled: boolean): Promise<unknown> {
     return this.request("set_plan_mode", { enabled });
   }
