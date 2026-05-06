@@ -11,6 +11,11 @@ import { JsonlWatcher, type WatchedFile } from "./watcher.js";
 import { processTranscriptLine, processSubagentLine, pairSubagentToParent } from "./parser.js";
 import { listKimiSessions } from "./kimiMetadata.js";
 import {
+  appendStreamingChatText,
+  resetStreamingChat,
+  type StreamingChatState,
+} from "./agentChat.js";
+import {
   KimiWireSession,
   contentInputText,
   contentPartText,
@@ -66,6 +71,7 @@ interface UiWireAgent {
   turnState: AgentTurnState;
   processState: AgentProcessState;
   runningPrompt: Promise<unknown> | null;
+  streamingChat: StreamingChatState;
 }
 
 const wireAgents = new Map<number, UiWireAgent>();
@@ -188,13 +194,13 @@ function setWireProcessState(ui: UiWireAgent, state: AgentProcessState, error?: 
   broadcast({ type: "agentProcessState", agentId: ui.agent.id, state, pid: ui.wire.pid, error });
 }
 
-function appendWireChat(
+function createWireChatEntry(
   ui: UiWireAgent,
   role: AgentChatRole,
   text: string,
   source: AgentChatEntry["source"] = "wire",
 ): AgentChatEntry {
-  const entry: AgentChatEntry = {
+  return {
     id: `${Date.now()}-${nextChatEntryId++}`,
     agentId: ui.agent.id,
     role,
@@ -202,7 +208,29 @@ function appendWireChat(
     createdAt: Date.now(),
     source,
   };
+}
+
+function appendWireChat(
+  ui: UiWireAgent,
+  role: AgentChatRole,
+  text: string,
+  source: AgentChatEntry["source"] = "wire",
+): AgentChatEntry {
+  resetStreamingChat(ui.streamingChat);
+  const entry = createWireChatEntry(ui, role, text, source);
   ui.conversation.push(entry);
+  broadcast({ type: "agentChatEntry", agentId: ui.agent.id, entry });
+  return entry;
+}
+
+function appendWireContentPart(ui: UiWireAgent, role: AgentChatRole, text: string): AgentChatEntry {
+  const { entry } = appendStreamingChatText({
+    conversation: ui.conversation,
+    stream: ui.streamingChat,
+    role,
+    text,
+    createEntry: () => createWireChatEntry(ui, role, text, "wire"),
+  });
   broadcast({ type: "agentChatEntry", agentId: ui.agent.id, entry });
   return entry;
 }
@@ -276,6 +304,7 @@ function spawnUiKimiAgent(msg: Extract<ClientMessage, { type: "spawnKimiAgent" }
     turnState: "idle",
     processState: "starting",
     runningPrompt: null,
+    streamingChat: { activeEntryId: null },
   };
   wireAgents.set(id, ui);
   bindWireAgent(ui);
@@ -437,9 +466,11 @@ function handleWireEvent(ui: UiWireAgent, event: WireEventParams): void {
   const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
   switch (event.type) {
     case "TurnBegin":
+      resetStreamingChat(ui.streamingChat);
       setWireTurnState(ui, "running");
       break;
     case "TurnEnd":
+      resetStreamingChat(ui.streamingChat);
       setWireTurnState(ui, "idle");
       clearWireTools(ui);
       break;
@@ -452,7 +483,7 @@ function handleWireEvent(ui: UiWireAgent, event: WireEventParams): void {
     case "ContentPart": {
       const part = contentPartText(payload);
       if (!part || !part.text.trim()) return;
-      appendWireChat(ui, part.role, part.text, "wire");
+      appendWireContentPart(ui, part.role, part.text);
       if (part.role === "assistant") {
         emitWireBubble(ui, part.text, "assistant", 9_000);
       }

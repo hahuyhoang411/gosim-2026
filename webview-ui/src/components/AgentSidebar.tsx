@@ -238,10 +238,11 @@ function ChatPanel({
     && draft.trim().length > 0
     && isDirectChatAgent
   const running = turnState === 'running' || turnState === 'waiting_for_approval' || turnState === 'waiting_for_answer'
+  const lastMessage = messages[messages.length - 1]
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight })
-  }, [messages.length, requests.length, agentId])
+  }, [messages.length, lastMessage?.id, lastMessage?.text, requests.length, agentId])
 
   const send = () => {
     if (!canSend || agentId === null || agentId === undefined) return
