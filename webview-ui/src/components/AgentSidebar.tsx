@@ -9,6 +9,14 @@ import type {
   SubagentCharacter,
 } from '../hooks/useExtensionMessages.js'
 import { flattenSubagentTools, getPresenceMeta, PRESENCE_META } from '../office/presence.js'
+import {
+  buildQuestionAnswers,
+  hasAnswerForEveryQuestion,
+  normalizeQuestionItems,
+  toggleMultiSelectAnswer,
+  type QuestionDraftValue,
+} from './agentRequestModel.js'
+import { coalesceVisibleAgentChatEntries } from '../hooks/agentChats.js'
 
 interface AgentSidebarProps {
   officeState: OfficeState
@@ -72,23 +80,23 @@ function formatTime(timestamp: number): string {
 
 function normalizeTaskDescription(text: string | undefined): string {
   const normalized = (text || '').replace(/\s+/g, ' ').trim()
-  return normalized || '…'
+  return normalized || '...'
 }
 
 function isPlaceholderTask(text: string | undefined): boolean {
   const normalized = normalizeTaskDescription(text)
-  return normalized === '…' || /^running subtask$/i.test(normalized)
+  return normalized === '...' || normalized === '…' || /^running subtask$/i.test(normalized)
 }
 
 function taskPhrase(text: string | undefined, fallback = 'this'): string {
   const normalized = normalizeTaskDescription(text)
   if (isPlaceholderTask(normalized)) return fallback
-  return normalized.length <= 72 ? normalized : `${normalized.slice(0, 71)}…`
+  return normalized.length <= 72 ? normalized : `${normalized.slice(0, 71)}...`
 }
 
 function subagentSummary(sub: SubagentCharacter | null | undefined): string {
   if (!sub) return 'None'
-  const task = isPlaceholderTask(sub.description) ? '…' : taskPhrase(sub.description)
+  const task = isPlaceholderTask(sub.description) ? '...' : taskPhrase(sub.description)
   return `${sub.name}: ${task}`
 }
 
@@ -117,7 +125,7 @@ function displayDescription(
   if (ch?.isSubagent) {
     const sub = subagentCharacters.find((item) => item.id === id)
     if (!sub) return undefined
-    return isPlaceholderTask(sub.description) ? '…' : taskPhrase(sub.description)
+    return isPlaceholderTask(sub.description) ? '...' : taskPhrase(sub.description)
   }
   return agentDescriptions[id] || ch?.folderName
 }
@@ -181,6 +189,182 @@ function payloadText(payload: Record<string, unknown>, fallback: string): string
   return fallback
 }
 
+function displayBlockText(block: unknown): string | null {
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return null
+  const record = block as Record<string, unknown>
+  if (record.type === 'brief' && typeof record.text === 'string') return record.text
+  if (record.type === 'shell' && typeof record.command === 'string') return `$ ${record.command}`
+  if (record.type === 'diff' && typeof record.path === 'string') return `Diff: ${record.path}`
+  if (record.type === 'todo' && Array.isArray(record.items)) return `${record.items.length} todo item(s)`
+  return null
+}
+
+function DisplayBlocks({ payload }: { payload: Record<string, unknown> }) {
+  const blocks = Array.isArray(payload.display)
+    ? payload.display.map(displayBlockText).filter((text): text is string => Boolean(text))
+    : []
+  if (blocks.length === 0) return null
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginBottom: 6 }}>
+      {blocks.map((block, index) => (
+        <div
+          key={`${index}:${block}`}
+          style={{
+            fontSize: 16,
+            color: 'var(--pixel-text-dim)',
+            borderLeft: '2px solid var(--pixel-border)',
+            paddingLeft: 6,
+            overflowWrap: 'anywhere',
+          }}
+        >
+          {block}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function ApprovalRequestCard({
+  agentId,
+  request,
+  onRespondApproval,
+}: {
+  agentId: number
+  request: AgentRequestMessage
+  onRespondApproval: AgentSidebarProps['onRespondApproval']
+}) {
+  const [feedback, setFeedback] = useState('')
+  const payload = request.payload || {}
+  const description = payloadText(payload, request.requestType)
+  const sender = typeof payload.sender === 'string' && payload.sender.trim() ? payload.sender : 'Kimi'
+  const submit = (response: 'approve' | 'approve_for_session' | 'reject') => {
+    onRespondApproval(agentId, request.requestId, response, feedback.trim() || undefined)
+  }
+
+  return (
+    <div style={{ border: '2px solid var(--pixel-status-permission)', padding: 6, background: 'rgba(204, 167, 0, 0.12)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6 }}>
+        <div style={{ fontSize: 18, color: 'var(--pixel-status-permission)' }}>Approval needed</div>
+        <div style={{ fontSize: 16, color: 'var(--pixel-text-dim)' }}>{sender}</div>
+      </div>
+      <div style={{ fontSize: 18, color: 'var(--vscode-foreground)', marginBottom: 5 }}>{description}</div>
+      <DisplayBlocks payload={payload} />
+      <textarea
+        value={feedback}
+        onChange={(e) => setFeedback(e.target.value)}
+        placeholder="Optional feedback for Kimi, especially when rejecting…"
+        rows={2}
+        style={requestTextareaStyle}
+      />
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        <button style={miniButtonStyle} onClick={() => submit('approve')}>Approve once</button>
+        <button style={miniButtonStyle} onClick={() => submit('approve_for_session')}>Session</button>
+        <button style={{ ...miniButtonStyle, color: 'var(--pixel-status-error)' }} onClick={() => submit('reject')}>Reject</button>
+      </div>
+    </div>
+  )
+}
+
+function QuestionRequestCard({
+  agentId,
+  request,
+  onRespondQuestion,
+}: {
+  agentId: number
+  request: AgentRequestMessage
+  onRespondQuestion: AgentSidebarProps['onRespondQuestion']
+}) {
+  const questions = normalizeQuestionItems(request.payload || {})
+  const [draft, setDraft] = useState<Record<string, QuestionDraftValue>>({})
+  const canSubmit = hasAnswerForEveryQuestion(questions, draft)
+
+  const setAnswer = (question: string, value: QuestionDraftValue) => {
+    setDraft((prev) => ({ ...prev, [question]: value }))
+  }
+
+  return (
+    <div style={{ border: '2px solid var(--pixel-status-waiting)', padding: 6, background: 'rgba(209, 134, 22, 0.12)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6, marginBottom: 5 }}>
+        <div style={{ fontSize: 18, color: 'var(--pixel-status-waiting)' }}>Question</div>
+        <div style={{ fontSize: 16, color: 'var(--pixel-text-dim)' }}>{questions.length} item{questions.length === 1 ? '' : 's'}</div>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {questions.map((question, index) => {
+          const value = draft[question.question]
+          const selectedSet = new Set(Array.isArray(value) ? value : typeof value === 'string' ? [value] : [])
+          return (
+            <div key={question.question} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+                <span style={{ color: 'var(--pixel-text-dim)', fontSize: 15 }}>{index + 1}/{questions.length}</span>
+                {question.header && (
+                  <span style={{ color: 'var(--pixel-status-waiting)', fontSize: 15, border: '1px solid currentColor', padding: '0 4px' }}>
+                    {question.header}
+                  </span>
+                )}
+                {question.multiSelect && <span style={{ color: 'var(--pixel-text-dim)', fontSize: 15 }}>multi-select</span>}
+              </div>
+              <div style={{ fontSize: 19, color: 'var(--vscode-foreground)' }}>{question.question}</div>
+              {question.options.length === 0 ? (
+                <textarea
+                  value={typeof value === 'string' ? value : ''}
+                  onChange={(e) => setAnswer(question.question, e.target.value)}
+                  placeholder="Type your answer…"
+                  rows={2}
+                  style={requestTextareaStyle}
+                />
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {question.options.map((option) => {
+                    const selected = selectedSet.has(option.label)
+                    return (
+                      <button
+                        key={option.label}
+                        onClick={() => {
+                          if (question.multiSelect) {
+                            setDraft((prev) => ({
+                              ...prev,
+                              [question.question]: toggleMultiSelectAnswer(
+                                question,
+                                Array.isArray(prev[question.question]) ? prev[question.question] as string[] : [],
+                                option.label,
+                              ),
+                            }))
+                          } else {
+                            setAnswer(question.question, option.label)
+                          }
+                        }}
+                        style={{
+                          ...miniButtonStyle,
+                          textAlign: 'left',
+                          borderColor: selected ? 'var(--pixel-status-waiting)' : 'var(--pixel-border)',
+                          background: selected ? 'rgba(209, 134, 22, 0.22)' : miniButtonStyle.background,
+                        }}
+                      >
+                        {option.label}
+                        {option.description && <span style={{ display: 'block', color: 'var(--pixel-text-dim)', fontSize: 15 }}>{option.description}</span>}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 4, marginTop: 7 }}>
+        <button style={miniButtonStyle} onClick={() => onRespondQuestion(agentId, request.requestId, {})}>Skip</button>
+        <button
+          style={{ ...miniButtonStyle, opacity: canSubmit ? 1 : 0.45, cursor: canSubmit ? 'pointer' : 'default' }}
+          disabled={!canSubmit}
+          onClick={() => onRespondQuestion(agentId, request.requestId, buildQuestionAnswers(questions, draft))}
+        >
+          Submit
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function RequestCard({
   agentId,
   request,
@@ -192,55 +376,10 @@ function RequestCard({
   onRespondApproval: AgentSidebarProps['onRespondApproval']
   onRespondQuestion: AgentSidebarProps['onRespondQuestion']
 }) {
-  const payload = request.payload || {}
   if (request.requestType === 'QuestionRequest') {
-    const questions = Array.isArray(payload.questions) ? payload.questions as Array<Record<string, unknown>> : []
-    const first = questions[0]
-    const question = typeof first?.question === 'string' ? first.question : 'Choose an answer'
-    const options = Array.isArray(first?.options) ? first.options as Array<Record<string, unknown>> : []
-    return (
-      <div style={{ border: '2px solid var(--pixel-status-waiting)', padding: 6, background: 'rgba(209, 134, 22, 0.12)' }}>
-        <div style={{ fontSize: 18, color: 'var(--pixel-status-waiting)' }}>Question</div>
-        <div style={{ fontSize: 19, color: 'var(--vscode-foreground)', marginBottom: 5 }}>{question}</div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          {options.length === 0 ? (
-            <button
-              onClick={() => onRespondQuestion(agentId, request.requestId, {})}
-              style={miniButtonStyle}
-            >
-              Dismiss
-            </button>
-          ) : options.map((option) => {
-            const label = typeof option.label === 'string' ? option.label : 'Option'
-            const description = typeof option.description === 'string' ? option.description : ''
-            return (
-              <button
-                key={label}
-                onClick={() => onRespondQuestion(agentId, request.requestId, { [question]: label })}
-                style={{ ...miniButtonStyle, textAlign: 'left' }}
-              >
-                {label}
-                {description && <span style={{ display: 'block', color: 'var(--pixel-text-dim)', fontSize: 15 }}>{description}</span>}
-              </button>
-            )
-          })}
-        </div>
-      </div>
-    )
+    return <QuestionRequestCard agentId={agentId} request={request} onRespondQuestion={onRespondQuestion} />
   }
-
-  const description = payloadText(payload, request.requestType)
-  return (
-    <div style={{ border: '2px solid var(--pixel-status-permission)', padding: 6, background: 'rgba(204, 167, 0, 0.12)' }}>
-      <div style={{ fontSize: 18, color: 'var(--pixel-status-permission)' }}>Approval needed</div>
-      <div style={{ fontSize: 18, color: 'var(--vscode-foreground)', marginBottom: 5 }}>{description}</div>
-      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-        <button style={miniButtonStyle} onClick={() => onRespondApproval(agentId, request.requestId, 'approve')}>Approve</button>
-        <button style={miniButtonStyle} onClick={() => onRespondApproval(agentId, request.requestId, 'approve_for_session')}>Session</button>
-        <button style={{ ...miniButtonStyle, color: 'var(--pixel-status-error)' }} onClick={() => onRespondApproval(agentId, request.requestId, 'reject')}>Reject</button>
-      </div>
-    </div>
-  )
+  return <ApprovalRequestCard agentId={agentId} request={request} onRespondApproval={onRespondApproval} />
 }
 
 const miniButtonStyle: CSSProperties = {
@@ -251,6 +390,20 @@ const miniButtonStyle: CSSProperties = {
   padding: '3px 6px',
   fontSize: 17,
   cursor: 'pointer',
+}
+
+const requestTextareaStyle: CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box',
+  resize: 'vertical',
+  background: 'rgba(255, 255, 255, 0.08)',
+  color: 'var(--pixel-text)',
+  border: '2px solid var(--pixel-border)',
+  borderRadius: 0,
+  padding: '4px 6px',
+  fontSize: 17,
+  outline: 'none',
+  marginBottom: 5,
 }
 
 function ChatPanel({
@@ -285,10 +438,12 @@ function ChatPanel({
     && draft.trim().length > 0
     && isDirectChatAgent
     && !awaitingResponse
+  const visibleMessages = coalesceVisibleAgentChatEntries(messages)
+  const lastMessage = visibleMessages[visibleMessages.length - 1]
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight })
-  }, [messages.length, requests.length, agentId])
+  }, [visibleMessages.length, lastMessage?.id, lastMessage?.text, requests.length, agentId])
 
   const send = () => {
     if (!canSend || agentId === null || agentId === undefined) return
@@ -326,7 +481,7 @@ function ChatPanel({
           <div style={{ fontSize: 19, color: 'var(--pixel-text-dim)' }}>
             {agentId === null || agentId === undefined ? 'Select an agent to chat.' : 'No chat yet.'}
           </div>
-        ) : messages.map((message) => (
+        ) : visibleMessages.map((message) => (
           <div
             key={message.id}
             style={{

@@ -4,8 +4,26 @@ A standalone web app that visualizes your **[kimi-cli](https://github.com/Moonsh
 
 Each kimi-cli agent becomes a character that walks around, sits at a desk, and visually reflects what it's doing — writing code, running tools, waiting for permission, or idle.
 
-> **Forked from `pixel-agents-standalone` (originally a Claude Code visualizer).**
-> The watcher and parser have been rewritten to read kimi-cli's session transcripts under `~/.kimi/sessions/`. The UI keeps the upstream pixel-office feel, with added kimi session picking, agent detail sidebar, presence states, and subagent timeline support.
+## What It Is
+
+A **virtual research lab** where your kimi-cli AI agents appear as pixel-art characters who work, debate, take coffee breaks, and collaborate in real time.
+
+Each agent gets a desk and a role — researcher, critic, writer, coordinator. They write shared TODOs on a team whiteboard, hold meetings around the conference table, and walk over to your desk when they need you. You watch the whole lab live in your browser, and click any agent to inspect what they're doing.
+
+## Why It Matters
+
+When you run multiple AI agents, you have no idea what they're doing until you dig through logs. Are they stuck? Arguing? Waiting for you to answer a question? You lose oversight and miss the moment to step in.
+
+This project turns invisible background jobs into a **visible team you can watch and guide**. You see agents gather for a meeting, spot a red error badge from across the room, and jump in exactly when human judgment is needed. The sidebar tells you who needs what, so you never have to grep a log file to understand your own agents.
+
+## Tech Stack
+
+| Layer | Stack |
+|---|---|
+| **Backend** | Node.js, TypeScript, Express, WebSocket (`ws`), `chokidar` |
+| **Frontend** | React 19, TypeScript, Vite |
+| **Graphics** | HTML5 Canvas 2D (sprite animation, pathfinding) |
+| **Runtime** | Bun, `tsx`, `esbuild` |
 
 ## What's Different from the Claude Code version
 

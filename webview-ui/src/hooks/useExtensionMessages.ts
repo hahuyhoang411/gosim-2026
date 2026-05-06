@@ -10,14 +10,23 @@ import { setCharacterTemplates } from '../office/sprites/spriteData.js'
 import { deriveAgentPresence } from '../office/presence.js'
 import { vscode } from '../vscodeApi.js'
 import { playDoneSound, setSoundEnabled } from '../notificationSound.js'
+import { upsertAgentChatEntry } from './agentChats.js'
+import { normalizeAgentTodos, summarizeTodos, type AgentTodoItem } from '../components/blackboardModel.js'
+import {
+  ROOM_LABELS,
+  reportRoomForSubagent,
+  roomForSeatId,
+  roomForToolStatus,
+  type AgentRoomKind,
+} from '../office/roomRouting.js'
 
 export interface SubagentCharacter {
   id: number
   parentAgentId: number
   parentToolId: string
-  /** Friendly preset name shown above the character (e.g. "Cleo") */
+  /** Friendly preset name shown above the character, e.g. "Cleo". */
   name: string
-  /** Task description streamed from the parent's Agent tool call */
+  /** Task description streamed from the parent's Agent/Task tool call. */
   description: string
 }
 
@@ -96,6 +105,8 @@ export interface ExtensionMessageState {
   agentTurnStates: Record<number, AgentTurnState>
   agentProcessStates: Record<number, AgentProcessInfo>
   agentRequests: Record<number, AgentRequestMessage[]>
+  agentTodoLists: Record<number, AgentTodoItem[]>
+  agentRooms: Record<number, AgentRoomKind>
   subagentTools: Record<number, Record<string, ToolActivity[]>>
   subagentCharacters: SubagentCharacter[]
   agentNames: Record<number, string>
@@ -106,6 +117,7 @@ export interface ExtensionMessageState {
   workspaceFolders: WorkspaceFolder[]
   kimiSessions: KimiSessionSummary[]
   setSelectedAgent: (id: number | null) => void
+  setAgentRooms: (rooms: Record<number, AgentRoomKind>) => void
 }
 
 const MAX_TIMELINE_EVENTS = 200
@@ -117,23 +129,36 @@ function compactText(text: string | undefined, maxLen = 120): string | undefined
   return `${normalized.slice(0, maxLen - 3)}...`
 }
 
+function hasActiveTool(list: ToolActivity[] | undefined): boolean {
+  return !!list?.some((tool) => !tool.done)
+}
+
 function normalizeTaskDescription(text: string | undefined): string {
   const normalized = (text || '').replace(/\s+/g, ' ').trim()
-  return normalized || '…'
+  return normalized || '...'
 }
 
 function isPlaceholderTask(text: string | undefined): boolean {
   const normalized = normalizeTaskDescription(text)
-  return normalized === '…' || /^running subtask$/i.test(normalized)
+  return normalized === '...' || normalized === '…' || /^running subtask$/i.test(normalized)
 }
 
 function taskPhrase(text: string | undefined, fallback = 'this'): string {
   const normalized = normalizeTaskDescription(text)
   if (isPlaceholderTask(normalized)) return fallback
-  return normalized.length <= 58 ? normalized : `${normalized.slice(0, 57)}…`
+  return normalized.length <= 58 ? normalized : `${normalized.slice(0, 57)}...`
 }
 
-function saveAgentSeats(os: OfficeState, names?: Record<number, string>): void {
+function routeCharacterToRoom(os: OfficeState, id: number, room: AgentRoomKind): boolean {
+  const currentRoom = roomForSeatId(os.characters.get(id)?.seatId)
+  if (currentRoom === room) {
+    os.moveAgentToRoom(id, room)
+    return false
+  }
+  return os.moveAgentToRoom(id, room)
+}
+
+export function saveAgentSeats(os: OfficeState, names?: Record<number, string>): void {
   const seats: Record<number, { palette: number; hueShift: number; seatId: string | null; name?: string }> = {}
   for (const ch of os.characters.values()) {
     if (ch.isSubagent) continue
@@ -155,19 +180,12 @@ export function useExtensionMessages(
   const [agentTurnStates, setAgentTurnStates] = useState<Record<number, AgentTurnState>>({})
   const [agentProcessStates, setAgentProcessStates] = useState<Record<number, AgentProcessInfo>>({})
   const [agentRequests, setAgentRequests] = useState<Record<number, AgentRequestMessage[]>>({})
+  const [agentTodoLists, setAgentTodoLists] = useState<Record<number, AgentTodoItem[]>>({})
+  const [agentRooms, setAgentRooms] = useState<Record<number, AgentRoomKind>>({})
   const [subagentTools, setSubagentTools] = useState<Record<number, Record<string, ToolActivity[]>>>({})
   const [subagentCharacters, setSubagentCharacters] = useState<SubagentCharacter[]>([])
   const [agentNames, setAgentNames] = useState<Record<number, string>>({})
   const [agentDescriptions, setAgentDescriptions] = useState<Record<number, string>>({})
-  const nameSeqRef = useRef(0)
-  const pickAgentName = useCallback(() => {
-    const next = AGENT_NAME_POOL[nameSeqRef.current % AGENT_NAME_POOL.length]
-    nameSeqRef.current += 1
-    return next
-  }, [])
-  const agentNamesRef = useRef<Record<number, string>>({})
-  const subagentCharactersRef = useRef<SubagentCharacter[]>([])
-  const subagentRemovalTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>())
   const [eventLog, setEventLog] = useState<AgentTimelineEvent[]>([])
   const [layoutReady, setLayoutReady] = useState(false)
   const [loadedAssets, setLoadedAssets] = useState<{ catalog: FurnitureAsset[]; sprites: Record<string, string[][]> } | undefined>()
@@ -179,7 +197,18 @@ export function useExtensionMessages(
   const eventSeqRef = useRef(0)
   const agentToolsRef = useRef(agentTools)
   const agentStatusesRef = useRef(agentStatuses)
+  const agentChatsRef = useRef(agentChats)
   const subagentToolsRef = useRef(subagentTools)
+  const agentNamesRef = useRef<Record<number, string>>({})
+  const subagentCharactersRef = useRef<SubagentCharacter[]>([])
+  const subagentRemovalTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>())
+  const nameSeqRef = useRef(0)
+
+  const pickAgentName = useCallback(() => {
+    const next = AGENT_NAME_POOL[nameSeqRef.current % AGENT_NAME_POOL.length]
+    nameSeqRef.current += 1
+    return next
+  }, [])
 
   const setAgentNamesSynced = useCallback((next: Record<number, string>) => {
     agentNamesRef.current = next
@@ -211,6 +240,22 @@ export function useExtensionMessages(
   }, [getOfficeState])
 
   useEffect(() => {
+    agentToolsRef.current = agentTools
+  }, [agentTools])
+
+  useEffect(() => {
+    agentStatusesRef.current = agentStatuses
+  }, [agentStatuses])
+
+  useEffect(() => {
+    agentChatsRef.current = agentChats
+  }, [agentChats])
+
+  useEffect(() => {
+    subagentToolsRef.current = subagentTools
+  }, [subagentTools])
+
+  useEffect(() => {
     agentNamesRef.current = agentNames
   }, [agentNames])
 
@@ -227,18 +272,6 @@ export function useExtensionMessages(
       timers.clear()
     }
   }, [])
-
-  useEffect(() => {
-    agentToolsRef.current = agentTools
-  }, [agentTools])
-
-  useEffect(() => {
-    agentStatusesRef.current = agentStatuses
-  }, [agentStatuses])
-
-  useEffect(() => {
-    subagentToolsRef.current = subagentTools
-  }, [subagentTools])
 
   const agentPresences = useMemo(() => {
     const next: Record<number, AgentPresence> = {}
@@ -367,6 +400,31 @@ export function useExtensionMessages(
           delete next[id]
           return next
         })
+        setAgentTodoLists((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+        setAgentRooms((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+        setAgentNames((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          agentNamesRef.current = next
+          return next
+        })
+        setAgentDescriptions((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
         setSubagentTools((prev) => {
           if (!(id in prev)) return prev
           const next = { ...prev }
@@ -399,8 +457,8 @@ export function useExtensionMessages(
         setAgentDescriptions((prev) => {
           const next = { ...prev }
           for (const id of incoming) {
-            const fn = folderNames[id]
-            if (fn && !next[id]) next[id] = fn
+            const folderName = folderNames[id]
+            if (folderName && !next[id]) next[id] = folderName
           }
           return next
         })
@@ -413,6 +471,26 @@ export function useExtensionMessages(
             }
           }
           return merged.sort((a, b) => a - b)
+        })
+      } else if (msg.type === 'agentTodoList') {
+        const id = msg.agentId as number
+        const todos = normalizeAgentTodos(msg.todos)
+        setAgentTodoLists((prev) => {
+          const next = { ...prev }
+          if (todos.length === 0) {
+            delete next[id]
+          } else {
+            next[id] = todos
+          }
+          return next
+        })
+        const summary = summarizeTodos(todos)
+        appendEvent({
+          type: 'agentTodoList',
+          agentId: id,
+          title: 'TODO updated',
+          detail: todos.length > 0 ? `${summary.done}/${summary.total} done` : 'cleared',
+          presence: deriveAgentPresence(id, agentToolsRef.current, agentStatusesRef.current, subagentToolsRef.current),
         })
       } else if (msg.type === 'agentToolStart') {
         const id = msg.id as number
@@ -446,6 +524,19 @@ export function useExtensionMessages(
         os.setAgentTool(id, toolName)
         os.setAgentActive(id, true)
         os.clearPermissionBubble(id)
+        const targetRoom = roomForToolStatus(status)
+        if (targetRoom && routeCharacterToRoom(os, id, targetRoom)) {
+          setAgentRooms((prev) => ({ ...prev, [id]: targetRoom }))
+          appendEvent({
+            type: 'agentRoomRouted',
+            agentId: id,
+            title: 'Room routed',
+            detail: ROOM_LABELS[targetRoom],
+            toolId,
+            presence: 'active',
+          })
+          persistAgentSeats()
+        }
         // Create sub-agent character for Task tool subtasks
         if (isSubtask) {
           const description = normalizeTaskDescription(status.slice('Subtask:'.length))
@@ -469,6 +560,17 @@ export function useExtensionMessages(
             setTimeout(() => os.showTextBubble(subId, 'On it', 'assistant', 3.5), 600)
           } else if (previousWasPlaceholder && !isPlaceholderTask(nextDescription)) {
             os.showTextBubble(id, `Hey ${subName}, look into ${taskPhrase(nextDescription)}`, 'steer', 5)
+          }
+          if (targetRoom && routeCharacterToRoom(os, subId, targetRoom)) {
+            setAgentRooms((prev) => ({ ...prev, [subId]: targetRoom }))
+            appendEvent({
+              type: 'agentRoomRouted',
+              agentId: id,
+              title: 'Subagent joins meeting room',
+              detail: ROOM_LABELS[targetRoom],
+              toolId,
+              presence: 'subagent',
+            })
           }
         }
       } else if (msg.type === 'agentToolDone') {
@@ -494,6 +596,11 @@ export function useExtensionMessages(
       } else if (msg.type === 'agentToolsClear') {
         const id = msg.id as number
         const preserveSubagents = msg.preserveSubagents === true
+        const subIds = preserveSubagents
+          ? []
+          : [...os.subagentMeta.entries()]
+            .filter(([, meta]) => meta.parentAgentId === id)
+            .map(([subId]) => subId)
         setAgentTools((prev) => {
           if (!(id in prev)) return prev
           const next = { ...prev }
@@ -507,8 +614,13 @@ export function useExtensionMessages(
             delete next[id]
             return next
           })
-          // Remove all sub-agent characters belonging to this agent
           os.removeAllSubagents(id)
+          setAgentRooms((prev) => {
+            if (subIds.length === 0) return prev
+            const next = { ...prev }
+            for (const subId of subIds) delete next[subId]
+            return next
+          })
           setSubagentCharactersSynced((prev) => prev.filter((s) => s.parentAgentId !== id))
         }
         os.setAgentTool(id, null)
@@ -543,12 +655,18 @@ export function useExtensionMessages(
       } else if (msg.type === 'agentChatEntry') {
         const id = msg.agentId as number
         const entry = msg.entry as AgentChatEntry
+        const currentList = agentChatsRef.current[id] || []
+        const isNewEntry = !currentList.some((item) => item.id === entry.id)
+        const nextList = upsertAgentChatEntry(currentList, entry)
+        if (nextList !== currentList) {
+          agentChatsRef.current = { ...agentChatsRef.current, [id]: nextList }
+        }
         setAgentChats((prev) => {
           const list = prev[id] || []
-          if (list.some((item) => item.id === entry.id)) return prev
-          return { ...prev, [id]: [...list, entry] }
+          const updated = upsertAgentChatEntry(list, entry)
+          return updated === list ? prev : { ...prev, [id]: updated }
         })
-        if (entry.role === 'user' || entry.role === 'assistant') {
+        if (isNewEntry && (entry.role === 'user' || entry.role === 'assistant')) {
           appendEvent({
             type: 'agentChatEntry',
             agentId: id,
@@ -556,6 +674,18 @@ export function useExtensionMessages(
             detail: compactText(entry.text),
             presence: entry.role === 'user' ? 'active' : deriveAgentPresence(id, agentToolsRef.current, agentStatusesRef.current, subagentToolsRef.current),
           })
+          const reportRoom = reportRoomForSubagent()
+          if (!hasActiveTool(agentToolsRef.current[id]) && routeCharacterToRoom(os, id, reportRoom)) {
+            setAgentRooms((prev) => ({ ...prev, [id]: reportRoom }))
+            appendEvent({
+              type: 'agentRoomRouted',
+              agentId: id,
+              title: 'Reporting to PI',
+              detail: ROOM_LABELS[reportRoom],
+              presence: 'active',
+            })
+            persistAgentSeats()
+          }
         }
       } else if (msg.type === 'agentBubble') {
         const id = msg.agentId as number
@@ -767,6 +897,19 @@ export function useExtensionMessages(
           const subToolName = extractToolName(status)
           os.setAgentTool(subId, subToolName)
           os.setAgentActive(subId, true)
+          const targetRoom = roomForToolStatus(status)
+          if (targetRoom && routeCharacterToRoom(os, subId, targetRoom)) {
+            setAgentRooms((prev) => ({ ...prev, [subId]: targetRoom }))
+            appendEvent({
+              type: 'agentRoomRouted',
+              agentId: id,
+              title: 'Subagent room routed',
+              detail: ROOM_LABELS[targetRoom],
+              parentToolId,
+              toolId,
+              presence: 'subagent',
+            })
+          }
         }
       } else if (msg.type === 'subagentToolDone') {
         const id = msg.id as number
@@ -799,6 +942,19 @@ export function useExtensionMessages(
             os.setAgentActive(subId, false)
             os.setAgentTool(subId, null)
             os.clearPermissionBubble(subId)
+            const reportRoom = reportRoomForSubagent()
+            if (routeCharacterToRoom(os, subId, reportRoom)) {
+              setAgentRooms((prev) => ({ ...prev, [subId]: reportRoom }))
+              appendEvent({
+                type: 'agentRoomRouted',
+                agentId: id,
+                title: 'Subagent reports to PI',
+                detail: ROOM_LABELS[reportRoom],
+                parentToolId,
+                toolId,
+                presence: 'subagent',
+              })
+            }
           }
         }
       } else if (msg.type === 'subagentClear') {
@@ -824,6 +980,14 @@ export function useExtensionMessages(
           }
           return { ...prev, [id]: next }
         })
+        const removeRoom = () => {
+          setAgentRooms((prev) => {
+            if (subId === null || !(subId in prev)) return prev
+            const next = { ...prev }
+            delete next[subId]
+            return next
+          })
+        }
         if (subId !== null && sub) {
           os.setAgentActive(subId, false)
           os.setAgentTool(subId, null)
@@ -832,12 +996,14 @@ export function useExtensionMessages(
           setTimeout(() => os.showTextBubble(id, `Got it, thanks ${sub.name}`, 'assistant', 3.5), 700)
           const timer = setTimeout(() => {
             os.removeSubagent(id, parentToolId)
+            removeRoom()
             setSubagentCharactersSynced((prev) => prev.filter((s) => !(s.parentAgentId === id && s.parentToolId === parentToolId)))
             subagentRemovalTimersRef.current.delete(removalKey)
           }, 1800)
           subagentRemovalTimersRef.current.set(removalKey, timer)
         } else {
           os.removeSubagent(id, parentToolId)
+          removeRoom()
           setSubagentCharactersSynced((prev) => prev.filter((s) => !(s.parentAgentId === id && s.parentToolId === parentToolId)))
         }
       } else if (msg.type === 'characterSpritesLoaded') {
@@ -897,6 +1063,8 @@ export function useExtensionMessages(
     agentTurnStates,
     agentProcessStates,
     agentRequests,
+    agentTodoLists,
+    agentRooms,
     subagentTools,
     subagentCharacters,
     agentNames,
@@ -907,5 +1075,6 @@ export function useExtensionMessages(
     workspaceFolders,
     kimiSessions,
     setSelectedAgent,
+    setAgentRooms,
   }
 }
