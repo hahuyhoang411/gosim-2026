@@ -7,7 +7,7 @@ import { EditorState } from './office/editor/editorState.js'
 import { EditTool } from './office/types.js'
 import { isRotatable } from './office/layout/furnitureCatalog.js'
 import { vscode } from './vscodeApi.js'
-import { saveAgentSeats, useExtensionMessages } from './hooks/useExtensionMessages.js'
+import { useExtensionMessages } from './hooks/useExtensionMessages.js'
 import { PULSE_ANIMATION_DURATION_SEC } from './constants.js'
 import { useEditorActions } from './hooks/useEditorActions.js'
 import { useEditorKeyboard } from './hooks/useEditorKeyboard.js'
@@ -17,7 +17,7 @@ import type { SpawnKimiAgentInput } from './components/AgentSpawnDialog.js'
 import { DebugView } from './components/DebugView.js'
 import { AgentSidebar } from './components/AgentSidebar.js'
 import { BlackboardPanel } from './components/BlackboardPanel.js'
-import { roomsForScenario, type ScenarioPresetId } from './office/roomRouting.js'
+import { RoomLabelsOverlay } from './components/RoomLabelsOverlay.js'
 
 // Game state lives outside React — updated imperatively by message handlers
 const officeStateRef = { current: null as OfficeState | null }
@@ -137,7 +137,6 @@ function App() {
     agentRequests,
     agentTodoLists,
     agentRooms,
-    setAgentRooms,
     subagentTools,
     subagentCharacters,
     eventLog,
@@ -148,7 +147,6 @@ function App() {
   } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
 
   const [isDebugMode, setIsDebugMode] = useState(false)
-  const [activeScenario, setActiveScenario] = useState<ScenarioPresetId | null>(null)
 
   const handleToggleDebugMode = useCallback(() => setIsDebugMode((prev) => !prev), [])
 
@@ -203,19 +201,6 @@ function App() {
     const focusId = meta ? meta.parentAgentId : id
     vscode.postMessage({ type: 'focusAgent', id: focusId })
   }, [setSelectedAgent])
-
-  const handleApplyScenario = useCallback((scenario: ScenarioPresetId) => {
-    const os = getOfficeState()
-    const assignments = roomsForScenario(scenario, agents)
-    let moved = false
-    for (const [agentIdText, room] of Object.entries(assignments)) {
-      const agentId = Number(agentIdText)
-      if (os.moveAgentToRoom(agentId, room)) moved = true
-    }
-    if (moved) saveAgentSeats(os)
-    setAgentRooms({ ...agentRooms, ...assignments })
-    setActiveScenario(scenario)
-  }, [agents, agentRooms, setAgentRooms])
 
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -393,15 +378,25 @@ function App() {
       />
 
       {!isDebugMode && (
+        <RoomLabelsOverlay
+          officeState={officeState}
+          containerRef={containerRef}
+          zoom={editor.zoom}
+          panRef={editor.panRef}
+        />
+      )}
+
+      {!isDebugMode && (
         <BlackboardPanel
           officeState={officeState}
           agents={agents}
           agentTodoLists={agentTodoLists}
           agentRooms={agentRooms}
-          activeScenario={activeScenario}
           selectedAgent={selectedAgent}
+          containerRef={containerRef}
+          zoom={editor.zoom}
+          panRef={editor.panRef}
           onSelectAgent={handleSelectAgent}
-          onApplyScenario={handleApplyScenario}
         />
       )}
 

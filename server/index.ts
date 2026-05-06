@@ -527,9 +527,9 @@ function handleWireEvent(ui: UiWireAgent, event: WireEventParams): void {
     case "ContentPart": {
       const part = contentPartText(payload);
       if (!part || !part.text.trim()) return;
-      appendWireContentPart(ui, part.role, part.text);
+      const entry = appendWireContentPart(ui, part.role, part.text);
       if (part.role === "assistant") {
-        emitWireBubble(ui, part.text, "assistant", 9_000);
+        emitWireBubble(ui, entry.text, "assistant", 9_000);
       }
       break;
     }

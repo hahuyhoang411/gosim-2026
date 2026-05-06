@@ -1,37 +1,37 @@
-import type { CSSProperties } from 'react'
+import { useEffect, useState, type CSSProperties, type RefObject } from 'react'
 import type { OfficeState } from '../office/engine/officeState.js'
 import {
+  ROOM_ANCHORS,
   ROOM_LABELS,
-  SCENARIO_LABELS,
   roomForSeatId,
   type AgentRoomKind,
-  type ScenarioPresetId,
 } from '../office/roomRouting.js'
 import { buildBlackboardSections, type AgentTodoItem, type AgentTodoStatus } from './blackboardModel.js'
+import { worldTileToScreen } from './worldOverlayPosition.js'
 
 interface BlackboardPanelProps {
   officeState: OfficeState
   agents: number[]
   agentTodoLists: Record<number, AgentTodoItem[]>
   agentRooms: Record<number, AgentRoomKind>
-  activeScenario: ScenarioPresetId | null
   selectedAgent: number | null
+  containerRef: RefObject<HTMLDivElement | null>
+  zoom: number
+  panRef: RefObject<{ x: number; y: number }>
   onSelectAgent: (id: number) => void
-  onApplyScenario: (scenario: ScenarioPresetId) => void
 }
 
 const panelStyle: CSSProperties = {
   position: 'absolute',
-  top: 10,
-  left: 10,
-  width: 300,
-  maxHeight: 'calc(100% - 92px)',
-  zIndex: 45,
+  width: 286,
+  maxHeight: 286,
+  zIndex: 38,
+  transform: 'translate(-50%, -50%)',
   pointerEvents: 'auto',
-  background: 'rgba(30, 30, 46, 0.96)',
-  border: '2px solid var(--pixel-border)',
+  background: '#17362c',
+  border: '4px solid #8d6a24',
   borderRadius: 0,
-  boxShadow: 'var(--pixel-shadow)',
+  boxShadow: '0 0 0 2px #3f2a10, 4px 4px 0 #0a0a14',
   color: 'var(--pixel-text)',
   display: 'flex',
   flexDirection: 'column',
@@ -40,25 +40,8 @@ const panelStyle: CSSProperties = {
 
 const headerStyle: CSSProperties = {
   padding: '8px 10px',
-  borderBottom: '2px solid var(--pixel-border)',
-  background: 'rgba(90, 140, 255, 0.13)',
-}
-
-const scenarioButtonStyle: CSSProperties = {
-  padding: '3px 6px',
-  border: '1px solid var(--pixel-border-light)',
-  borderRadius: 0,
-  background: 'rgba(255, 255, 255, 0.06)',
-  color: 'var(--pixel-text)',
-  cursor: 'pointer',
-  fontSize: 15,
-}
-
-const scenarioButtonActiveStyle: CSSProperties = {
-  ...scenarioButtonStyle,
-  border: '1px solid var(--pixel-accent)',
-  background: 'var(--pixel-active-bg)',
-  color: 'var(--vscode-foreground)',
+  borderBottom: '3px solid #8d6a24',
+  background: 'rgba(14, 25, 23, 0.34)',
 }
 
 const statusMeta: Record<AgentTodoStatus, { symbol: string; color: string; label: string }> = {
@@ -78,42 +61,62 @@ function agentRoomLabel(officeState: OfficeState, agentRooms: Record<number, Age
   return seatRoom ? ROOM_LABELS[seatRoom] : 'Unassigned'
 }
 
+function boardRoomForSelection(
+  officeState: OfficeState,
+  agentRooms: Record<number, AgentRoomKind>,
+  selectedAgent: number | null,
+  agents: number[],
+): AgentRoomKind {
+  const candidates = [
+    ...(selectedAgent !== null ? [selectedAgent] : []),
+    ...agents,
+  ]
+
+  for (const id of candidates) {
+    const assignedRoom = agentRooms[id]
+    if (assignedRoom) return assignedRoom
+    const seatRoom = roomForSeatId(officeState.characters.get(id)?.seatId)
+    if (seatRoom) return seatRoom
+  }
+
+  return 'debate'
+}
+
 export function BlackboardPanel({
   officeState,
   agents,
   agentTodoLists,
   agentRooms,
-  activeScenario,
   selectedAgent,
+  containerRef,
+  zoom,
+  panRef,
   onSelectAgent,
-  onApplyScenario,
 }: BlackboardPanelProps) {
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    let rafId = 0
+    const tick = () => {
+      setTick((n) => n + 1)
+      rafId = requestAnimationFrame(tick)
+    }
+    rafId = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(rafId)
+  }, [])
+
   const sections = buildBlackboardSections(agents, agentTodoLists)
-  const scenarioButtons: ScenarioPresetId[] = ['solo_research', 'debate', 'brainstorm', 'search_squad']
+  const boardRoom = boardRoomForSelection(officeState, agentRooms, selectedAgent, agents)
+  const anchor = ROOM_ANCHORS[boardRoom]
+  const position = worldTileToScreen(officeState, containerRef, zoom, panRef, anchor.col, anchor.row)
+
+  if (!position) return null
 
   return (
-    <section style={panelStyle} aria-label="Research Blackboard">
+    <section style={{ ...panelStyle, left: position.x, top: position.y }} aria-label={`${ROOM_LABELS[boardRoom]} Blackboard`}>
       <div style={headerStyle}>
-        <div style={{ fontSize: 22, color: 'var(--vscode-foreground)' }}>Research Blackboard</div>
+        <div style={{ fontSize: 21, color: 'var(--vscode-foreground)' }}>{ROOM_LABELS[boardRoom]} Blackboard</div>
         <div style={{ fontSize: 16, color: 'var(--pixel-text-dim)' }}>
-          {activeScenario ? `${SCENARIO_LABELS[activeScenario]} scenario` : 'Kimi TODOs from SetTodoList'}
-        </div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 7 }}>
-          {scenarioButtons.map((scenario) => (
-            <button
-              key={scenario}
-              type="button"
-              disabled={agents.length === 0}
-              onClick={() => onApplyScenario(scenario)}
-              style={{
-                ...(activeScenario === scenario ? scenarioButtonActiveStyle : scenarioButtonStyle),
-                opacity: agents.length === 0 ? 0.45 : 1,
-                cursor: agents.length === 0 ? 'default' : 'pointer',
-              }}
-            >
-              {SCENARIO_LABELS[scenario]}
-            </button>
-          ))}
+          Live Kimi TODOs · room follows tool/action state
         </div>
       </div>
 

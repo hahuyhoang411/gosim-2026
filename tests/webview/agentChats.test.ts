@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { upsertAgentChatEntry } from "../../webview-ui/src/hooks/agentChats.js";
+import {
+  coalesceVisibleAgentChatEntries,
+  upsertAgentChatEntry,
+} from "../../webview-ui/src/hooks/agentChats.js";
 import type { AgentChatEntry } from "../../webview-ui/src/hooks/useExtensionMessages.js";
 
 function entry(id: string, text: string): AgentChatEntry {
@@ -31,5 +34,42 @@ describe("webview agent chat entry upsert", () => {
     const updatedFirst = entry("a", "First updated");
 
     expect(upsertAgentChatEntry([first, second], updatedFirst)).toEqual([updatedFirst, second]);
+  });
+});
+
+describe("visible wire chat coalescing", () => {
+  test("renders adjacent assistant wire chunks as one visible message even when ids differ", () => {
+    const visible = coalesceVisibleAgentChatEntries([
+      entry("chunk-1", "Hello"),
+      entry("chunk-2", "!"),
+      entry("chunk-3", " I'm Kimi"),
+    ]);
+
+    expect(visible).toHaveLength(1);
+    expect(visible[0]).toMatchObject({
+      id: "chunk-1..chunk-3",
+      role: "assistant",
+      text: "Hello! I'm Kimi",
+      source: "wire",
+    });
+  });
+
+  test("does not merge assistant chunks across a user message", () => {
+    const user: AgentChatEntry = {
+      ...entry("user-1", "hello"),
+      role: "user",
+    };
+
+    const visible = coalesceVisibleAgentChatEntries([
+      entry("assistant-1", "First"),
+      user,
+      entry("assistant-2", "Second"),
+    ]);
+
+    expect(visible.map((item) => [item.role, item.text])).toEqual([
+      ["assistant", "First"],
+      ["user", "hello"],
+      ["assistant", "Second"],
+    ]);
   });
 });
