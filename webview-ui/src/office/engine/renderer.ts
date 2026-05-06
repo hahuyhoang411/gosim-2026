@@ -586,11 +586,13 @@ export function renderBubbles(
   offsetX: number,
   offsetY: number,
   zoom: number,
+  renderText = true,
 ): void {
   for (const ch of characters) {
     if (!ch.bubbleType) continue
 
     if (ch.bubbleType === 'text') {
+      if (!renderText) continue
       let alpha = 1.0
       if (ch.bubbleTimer < BUBBLE_FADE_DURATION_SEC) {
         alpha = ch.bubbleTimer / BUBBLE_FADE_DURATION_SEC
@@ -719,7 +721,7 @@ export function renderFrame(
   renderScene(ctx, allFurniture, characters, offsetX, offsetY, zoom, selectedId, hoveredId)
 
   // Speech bubbles (always on top of characters)
-  renderBubbles(ctx, characters, offsetX, offsetY, zoom)
+  renderBubbles(ctx, characters, offsetX, offsetY, zoom, false)
 
   // Editor overlays
   if (editor) {

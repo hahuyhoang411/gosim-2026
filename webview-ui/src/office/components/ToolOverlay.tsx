@@ -12,6 +12,7 @@ interface ToolOverlayProps {
   agentTools: Record<number, ToolActivity[]>
   agentPresences: Record<number, AgentPresence>
   subagentCharacters: SubagentCharacter[]
+  agentNames: Record<number, string>
   containerRef: React.RefObject<HTMLDivElement | null>
   zoom: number
   panRef: React.RefObject<{ x: number; y: number }>
@@ -54,6 +55,7 @@ export function ToolOverlay({
   agentTools,
   agentPresences,
   subagentCharacters,
+  agentNames,
   containerRef,
   zoom,
   panRef,
@@ -104,8 +106,11 @@ export function ToolOverlay({
         const screenX = (deviceOffsetX + ch.x * zoom) / dpr
         const screenY = (deviceOffsetY + (ch.y + sittingOffset - TOOL_OVERLAY_VERTICAL_OFFSET) * zoom) / dpr
 
-        // Always show name label; show activity details on hover/select
-        const displayName = ch.folderName || (isSub ? 'Subtask' : `Agent #${id}`)
+        // Resolve preset name for the floor label; task detail lives in the sidebar.
+        const subRecord = isSub ? subagentCharacters.find((s) => s.id === id) : undefined
+        const displayName = isSub
+          ? (subRecord?.name || 'Sub')
+          : (agentNames[id] || ch.folderName || `Agent #${id}`)
 
         // Get activity text (only needed when showing details)
         let activityText = ''
@@ -117,8 +122,7 @@ export function ToolOverlay({
               activityText = 'Needs approval'
               presence = 'permission'
             } else {
-              const sub = subagentCharacters.find((s) => s.id === id)
-              activityText = sub ? sub.label : 'Subtask'
+              activityText = subRecord?.description || 'Subtask'
               presence = ch.isActive ? 'active' : 'idle'
             }
           } else {
@@ -234,12 +238,17 @@ export function ToolOverlay({
                   padding: '1px 6px',
                   boxShadow: 'var(--pixel-shadow)',
                   whiteSpace: 'nowrap',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  lineHeight: 1.1,
                 }}
               >
                 <span
                   style={{
-                    fontSize: '16px',
-                    color: 'var(--pixel-text-dim)',
+                    fontSize: '17px',
+                    fontStyle: isSub ? 'italic' : undefined,
+                    color: 'var(--vscode-foreground)',
                   }}
                 >
                   {displayName}

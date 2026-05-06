@@ -31,6 +31,8 @@ interface AgentSidebarProps {
   agentRequests: Record<number, AgentRequestMessage[]>
   subagentTools: Record<number, Record<string, ToolActivity[]>>
   subagentCharacters: SubagentCharacter[]
+  agentNames: Record<number, string>
+  agentDescriptions: Record<number, string>
   eventLog: AgentTimelineEvent[]
   onSelectAgent: (id: number) => void
   onCloseAgent: (id: number) => void
@@ -76,14 +78,56 @@ function formatTime(timestamp: number): string {
   })
 }
 
-function displayName(officeState: OfficeState, id: number, subagentCharacters: SubagentCharacter[]): string {
+function normalizeTaskDescription(text: string | undefined): string {
+  const normalized = (text || '').replace(/\s+/g, ' ').trim()
+  return normalized || '...'
+}
+
+function isPlaceholderTask(text: string | undefined): boolean {
+  const normalized = normalizeTaskDescription(text)
+  return normalized === '...' || normalized === '…' || /^running subtask$/i.test(normalized)
+}
+
+function taskPhrase(text: string | undefined, fallback = 'this'): string {
+  const normalized = normalizeTaskDescription(text)
+  if (isPlaceholderTask(normalized)) return fallback
+  return normalized.length <= 72 ? normalized : `${normalized.slice(0, 71)}...`
+}
+
+function subagentSummary(sub: SubagentCharacter | null | undefined): string {
+  if (!sub) return 'None'
+  const task = isPlaceholderTask(sub.description) ? '...' : taskPhrase(sub.description)
+  return `${sub.name}: ${task}`
+}
+
+function displayName(
+  officeState: OfficeState,
+  id: number,
+  subagentCharacters: SubagentCharacter[],
+  agentNames: Record<number, string>,
+): string {
   const ch = officeState.characters.get(id)
-  if (ch?.folderName) return ch.folderName
   if (ch?.isSubagent) {
     const sub = subagentCharacters.find((item) => item.id === id)
-    return sub?.label || 'Subagent'
+    return sub?.name || 'Subagent'
   }
-  return `Agent #${id}`
+  return agentNames[id] || ch?.folderName || `Agent #${id}`
+}
+
+function displayDescription(
+  officeState: OfficeState,
+  id: number | null | undefined,
+  subagentCharacters: SubagentCharacter[],
+  agentDescriptions: Record<number, string>,
+): string | undefined {
+  if (id === null || id === undefined) return undefined
+  const ch = officeState.characters.get(id)
+  if (ch?.isSubagent) {
+    const sub = subagentCharacters.find((item) => item.id === id)
+    if (!sub) return undefined
+    return isPlaceholderTask(sub.description) ? '...' : taskPhrase(sub.description)
+  }
+  return agentDescriptions[id] || ch?.folderName
 }
 
 function toolLabel(tool: ToolActivity | undefined): string {
@@ -386,11 +430,14 @@ function ChatPanel({
   const [draft, setDraft] = useState('')
   const listRef = useRef<HTMLDivElement>(null)
   const isDirectChatAgent = process?.state === 'ready'
+  const awaitingResponse = turnState === 'waiting_for_approval' || turnState === 'waiting_for_answer'
+  const running = turnState === 'running'
+  const showCancel = running || awaitingResponse
   const canSend = agentId !== null
     && agentId !== undefined
     && draft.trim().length > 0
     && isDirectChatAgent
-  const running = turnState === 'running' || turnState === 'waiting_for_approval' || turnState === 'waiting_for_answer'
+    && !awaitingResponse
   const visibleMessages = coalesceVisibleAgentChatEntries(messages)
   const lastMessage = visibleMessages[visibleMessages.length - 1]
 
@@ -477,7 +524,7 @@ function ChatPanel({
         ))}
       </div>
 
-      <div style={{ padding: '6px 10px 9px', display: 'grid', gridTemplateColumns: running ? '1fr auto auto' : '1fr auto', gap: 5 }}>
+      <div style={{ padding: '6px 10px 9px', display: 'grid', gridTemplateColumns: showCancel ? '1fr auto auto' : '1fr auto', gap: 5 }}>
         <textarea
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
@@ -487,8 +534,16 @@ function ChatPanel({
               send()
             }
           }}
-          placeholder={!process ? 'Open a New Kimi Agent for direct chat…' : running ? 'Steer the running turn…' : 'Message Kimi…'}
-          disabled={!isDirectChatAgent}
+          placeholder={
+            !process
+              ? 'Open a New Kimi Agent for direct chat…'
+              : awaitingResponse
+                ? 'Respond to the request above first…'
+                : running
+                  ? 'Steer the running turn…'
+                  : 'Message Kimi…'
+          }
+          disabled={!isDirectChatAgent || awaitingResponse}
           rows={2}
           style={{
             minWidth: 0,
@@ -502,7 +557,7 @@ function ChatPanel({
             outline: 'none',
           }}
         />
-        {running && agentId !== null && agentId !== undefined && (
+        {showCancel && agentId !== null && agentId !== undefined && (
           <button style={{ ...miniButtonStyle, color: 'var(--pixel-status-error)' }} onClick={() => onCancelAgentTurn(agentId)}>
             Cancel
           </button>
@@ -571,6 +626,8 @@ export function AgentSidebar({
   agentRequests,
   subagentTools,
   subagentCharacters,
+  agentNames,
+  agentDescriptions,
   eventLog,
   onSelectAgent,
   onCloseAgent,
@@ -586,7 +643,8 @@ export function AgentSidebar({
     : null
   const selectedName = selectedAgent === null
     ? 'No agent'
-    : displayName(officeState, selectedAgent, subagentCharacters)
+    : displayName(officeState, selectedAgent, subagentCharacters, agentNames)
+  const selectedDescription = displayDescription(officeState, selectedAgent, subagentCharacters, agentDescriptions)
 
   const parentTools = selectedParentId === null || selectedParentId === undefined ? [] : agentTools[selectedParentId] || []
   const parentSubs = selectedParentId === null || selectedParentId === undefined ? {} : subagentTools[selectedParentId] || {}
@@ -617,7 +675,8 @@ export function AgentSidebar({
           {agents.length === 0 ? (
             <div style={{ fontSize: 20, color: 'var(--pixel-text-dim)' }}>No agents</div>
           ) : agents.map((id) => {
-            const name = displayName(officeState, id, subagentCharacters)
+            const name = displayName(officeState, id, subagentCharacters, agentNames)
+            const description = agentDescriptions[id] || officeState.characters.get(id)?.folderName
             const presence = agentPresences[id] || 'idle'
             const isSelected = selectedParentId === id && !selectedCh?.isSubagent
             return (
@@ -639,7 +698,14 @@ export function AgentSidebar({
                   minWidth: 0,
                 }}
               >
-                <span style={{ fontSize: 21, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+                <span style={{ minWidth: 0, overflow: 'hidden' }}>
+                  <span style={{ display: 'block', fontSize: 21, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+                  {description && (
+                    <span style={{ display: 'block', fontSize: 15, color: 'var(--pixel-text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {description}
+                    </span>
+                  )}
+                </span>
                 <PresencePill presence={presence} />
               </button>
             )
@@ -654,6 +720,11 @@ export function AgentSidebar({
             <div style={{ fontSize: 25, color: 'var(--vscode-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {selectedName}
             </div>
+            {selectedDescription && (
+              <div style={{ fontSize: 17, color: 'var(--pixel-text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {selectedDescription}
+              </div>
+            )}
           </div>
           <PresencePill presence={selectedPresence} />
         </div>
@@ -665,7 +736,7 @@ export function AgentSidebar({
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{toolLabel(selectedLatestTool)}</span>
           <span style={{ color: 'var(--pixel-text-dim)' }}>Subagent</span>
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {latestSubagent ? latestSubagent.label : 'None'}
+            {subagentSummary(latestSubagent)}
           </span>
           <span style={{ color: 'var(--pixel-text-dim)' }}>Raw</span>
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -682,7 +753,7 @@ export function AgentSidebar({
                 return (
                   <div key={parentToolId} style={{ borderLeft: '2px solid var(--pixel-status-subagent)', paddingLeft: 7 }}>
                     <div style={{ fontSize: 17, color: 'var(--pixel-text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {sub?.label || parentToolId}
+                      {sub ? subagentSummary(sub) : parentToolId}
                     </div>
                     {list.slice(-3).map((tool) => (
                       <div key={tool.toolId} style={{ fontSize: 18, opacity: tool.done ? 0.55 : 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

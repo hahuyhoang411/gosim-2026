@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from 'react'
 import { OfficeState } from './office/engine/officeState.js'
 import { OfficeCanvas } from './office/components/OfficeCanvas.js'
+import { TextBubbleOverlay } from './office/components/TextBubbleOverlay.js'
 import { ToolOverlay } from './office/components/ToolOverlay.js'
 import { EditorToolbar } from './office/editor/EditorToolbar.js'
 import { EditorState } from './office/editor/editorState.js'
@@ -141,6 +142,8 @@ function App() {
     agentRooms,
     subagentTools,
     subagentCharacters,
+    agentNames,
+    agentDescriptions,
     eventLog,
     layoutReady,
     loadedAssets,
@@ -381,10 +384,18 @@ function App() {
         agentTools={agentTools}
         agentPresences={agentPresences}
         subagentCharacters={subagentCharacters}
+        agentNames={agentNames}
         containerRef={containerRef}
         zoom={editor.zoom}
         panRef={editor.panRef}
         onCloseAgent={handleCloseAgent}
+      />
+
+      <TextBubbleOverlay
+        officeState={officeState}
+        containerRef={containerRef}
+        zoom={editor.zoom}
+        panRef={editor.panRef}
       />
 
       {!isDebugMode && (
@@ -424,6 +435,8 @@ function App() {
           agentRequests={agentRequests}
           subagentTools={subagentTools}
           subagentCharacters={subagentCharacters}
+          agentNames={agentNames}
+          agentDescriptions={agentDescriptions}
           eventLog={eventLog}
           onSelectAgent={handleSelectAgent}
           onCloseAgent={handleCloseAgent}
