@@ -121,6 +121,7 @@ export const FurnitureType = {
   PLANT: 'plant',
   COOLER: 'cooler',
   WHITEBOARD: 'whiteboard',
+  BLACKBOARD: 'blackboard',
   CHAIR: 'chair',
   PC: 'pc',
   LAMP: 'lamp',

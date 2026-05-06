@@ -4,8 +4,9 @@ import { OfficeCanvas } from './office/components/OfficeCanvas.js'
 import { ToolOverlay } from './office/components/ToolOverlay.js'
 import { EditorToolbar } from './office/editor/EditorToolbar.js'
 import { EditorState } from './office/editor/editorState.js'
-import { EditTool } from './office/types.js'
+import { EditTool, type PlacedFurniture } from './office/types.js'
 import { isRotatable } from './office/layout/furnitureCatalog.js'
+import { roomForBlackboardFurniture } from './office/interactiveFurniture.js'
 import { vscode } from './vscodeApi.js'
 import { useExtensionMessages } from './hooks/useExtensionMessages.js'
 import { PULSE_ANIMATION_DURATION_SEC } from './constants.js'
@@ -18,6 +19,7 @@ import { DebugView } from './components/DebugView.js'
 import { AgentSidebar } from './components/AgentSidebar.js'
 import { BlackboardPanel } from './components/BlackboardPanel.js'
 import { RoomLabelsOverlay } from './components/RoomLabelsOverlay.js'
+import type { AgentRoomKind } from './office/roomRouting.js'
 
 // Game state lives outside React — updated imperatively by message handlers
 const officeStateRef = { current: null as OfficeState | null }
@@ -147,8 +149,15 @@ function App() {
   } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
 
   const [isDebugMode, setIsDebugMode] = useState(false)
+  const [isBlackboardOpen, setIsBlackboardOpen] = useState(false)
+  const [activeBlackboardRoom, setActiveBlackboardRoom] = useState<AgentRoomKind | null>(null)
 
   const handleToggleDebugMode = useCallback(() => setIsDebugMode((prev) => !prev), [])
+  const handleOpenBlackboard = useCallback((furniture: PlacedFurniture) => {
+    setActiveBlackboardRoom(roomForBlackboardFurniture(furniture))
+    setIsBlackboardOpen(true)
+  }, [])
+  const handleCloseBlackboard = useCallback(() => setIsBlackboardOpen(false), [])
 
   const handleRefreshKimiSessions = useCallback(() => {
     vscode.postMessage({ type: 'listKimiSessions' })
@@ -274,6 +283,7 @@ function App() {
       <OfficeCanvas
         officeState={officeState}
         onClick={handleClick}
+        onFurnitureClick={handleOpenBlackboard}
         isEditMode={editor.isEditMode}
         editorState={editorState}
         onEditorTileAction={editor.handleEditorTileAction}
@@ -388,15 +398,15 @@ function App() {
 
       {!isDebugMode && (
         <BlackboardPanel
+          isOpen={isBlackboardOpen}
+          activeRoom={activeBlackboardRoom}
           officeState={officeState}
           agents={agents}
           agentTodoLists={agentTodoLists}
           agentRooms={agentRooms}
           selectedAgent={selectedAgent}
-          containerRef={containerRef}
-          zoom={editor.zoom}
-          panRef={editor.panRef}
           onSelectAgent={handleSelectAgent}
+          onClose={handleCloseBlackboard}
         />
       )}
 

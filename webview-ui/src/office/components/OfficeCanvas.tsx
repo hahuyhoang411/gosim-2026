@@ -4,16 +4,18 @@ import type { EditorState } from '../editor/editorState.js'
 import type { EditorRenderState, SelectionRenderState, DeleteButtonBounds, RotateButtonBounds } from '../engine/renderer.js'
 import { startGameLoop } from '../engine/gameLoop.js'
 import { renderFrame } from '../engine/renderer.js'
-import { TILE_SIZE, EditTool } from '../types.js'
+import { TILE_SIZE, EditTool, type PlacedFurniture } from '../types.js'
 import { CAMERA_FOLLOW_LERP, CAMERA_FOLLOW_SNAP_THRESHOLD, ZOOM_MIN, ZOOM_MAX, ZOOM_SCROLL_THRESHOLD, PAN_MARGIN_FRACTION } from '../../constants.js'
 import { getCatalogEntry, isRotatable } from '../layout/furnitureCatalog.js'
 import { canPlaceFurniture, getWallPlacementRow } from '../editor/editorActions.js'
 import { vscode } from '../../vscodeApi.js'
 import { unlockAudio } from '../../notificationSound.js'
+import { findInteractiveFurnitureAtTile } from '../interactiveFurniture.js'
 
 interface OfficeCanvasProps {
   officeState: OfficeState
   onClick: (agentId: number) => void
+  onFurnitureClick?: (furniture: PlacedFurniture) => void
   isEditMode: boolean
   editorState: EditorState
   onEditorTileAction: (col: number, row: number) => void
@@ -28,7 +30,7 @@ interface OfficeCanvasProps {
   panRef: React.MutableRefObject<{ x: number; y: number }>
 }
 
-export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, onEditorTileAction, onEditorEraseAction, onEditorSelectionChange, onDeleteSelected, onRotateSelected, onDragMove, editorTick: _editorTick, zoom, onZoomChange, panRef }: OfficeCanvasProps) {
+export function OfficeCanvas({ officeState, onClick, onFurnitureClick, isEditMode, editorState, onEditorTileAction, onEditorEraseAction, onEditorSelectionChange, onDeleteSelected, onRotateSelected, onDragMove, editorTick: _editorTick, zoom, onZoomChange, panRef }: OfficeCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const offsetRef = useRef({ x: 0, y: 0 })
@@ -378,6 +380,8 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
         let cursor = 'default'
         if (hitId !== null) {
           cursor = 'pointer'
+        } else if (tile && findInteractiveFurnitureAtTile(officeState.getLayout(), tile.col, tile.row)) {
+          cursor = 'pointer'
         } else if (officeState.selectedAgentId !== null && tile) {
           // Check if hovering over a clickable seat (available or own)
           const seatId = officeState.getSeatAtTile(tile.col, tile.row)
@@ -562,12 +566,20 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
         return
       }
 
+      const tile = screenToTile(e.clientX, e.clientY)
+      if (tile) {
+        const furniture = findInteractiveFurnitureAtTile(officeState.getLayout(), tile.col, tile.row)
+        if (furniture && onFurnitureClick) {
+          onFurnitureClick(furniture)
+          return
+        }
+      }
+
       // No agent hit — check seat click while agent is selected
       if (officeState.selectedAgentId !== null) {
         const selectedCh = officeState.characters.get(officeState.selectedAgentId)
         // Skip seat reassignment for sub-agents
         if (selectedCh && !selectedCh.isSubagent) {
-          const tile = screenToTile(e.clientX, e.clientY)
           if (tile) {
             const seatId = officeState.getSeatAtTile(tile.col, tile.row)
             if (seatId) {
@@ -602,7 +614,7 @@ export function OfficeCanvas({ officeState, onClick, isEditMode, editorState, on
         officeState.cameraFollowId = null
       }
     },
-    [officeState, onClick, screenToWorld, screenToTile, isEditMode],
+    [officeState, onClick, onFurnitureClick, screenToWorld, screenToTile, isEditMode],
   )
 
   const handleMouseLeave = useCallback(() => {

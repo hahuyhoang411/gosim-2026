@@ -193,6 +193,46 @@ export const WHITEBOARD_SPRITE: SpriteData = (() => {
   ]
 })()
 
+/** Blackboard: 32x20 (2 tiles wide, 1 tile footprint) — clickable TODO board */
+export const BLACKBOARD_SPRITE: SpriteData = (() => {
+  const W = '#8B5A2B'
+  const L = '#B07A35'
+  const D = '#4A2C12'
+  const B = '#17362C'
+  const H = '#245144'
+  const C = '#DCEBD8'
+  const E = '#0E211B'
+  const rows: string[][] = []
+
+  rows.push(new Array(32).fill(_))
+  rows.push([_, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, _])
+  rows.push([D, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, L, D])
+  for (let r = 0; r < 12; r++) {
+    const row = new Array(32).fill(B) as string[]
+    row[0] = D; row[1] = W; row[30] = L; row[31] = D
+    if (r === 0) {
+      for (let c = 3; c <= 28; c++) row[c] = H
+    }
+    if (r === 3) {
+      row[5] = C; row[6] = C; row[10] = C; row[11] = C; row[15] = C; row[16] = C
+    }
+    if (r === 6) {
+      row[4] = C; row[8] = C; row[9] = C; row[13] = C; row[20] = C; row[21] = C; row[22] = C
+    }
+    if (r === 9) {
+      row[6] = C; row[7] = C; row[12] = C; row[18] = C; row[23] = C; row[24] = C
+    }
+    rows.push(row)
+  }
+  rows.push([D, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, L, D])
+  rows.push([_, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, _])
+  rows.push([_, _, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, _, _])
+  rows.push([_, _, _, _, D, D, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, D, D, _, _, _, _])
+  rows.push([_, _, _, _, D, D, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, D, D, _, _, _, _])
+  rows.push(new Array(32).fill(_))
+  return rows
+})()
+
 /** Chair: 16x16 — top-down desk chair */
 export const CHAIR_SPRITE: SpriteData = (() => {
   const W = '#8B6914'

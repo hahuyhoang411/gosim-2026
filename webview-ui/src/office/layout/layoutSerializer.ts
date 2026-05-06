@@ -290,9 +290,9 @@ export function createDefaultLayout(): OfficeLayout {
     { uid: 'conf-chair-4', type: FurnitureType.CHAIR, col: 4, row: 5 },
     { uid: 'conf-chair-5', type: FurnitureType.CHAIR, col: 6, row: 5 },
     { uid: 'conf-chair-6', type: FurnitureType.CHAIR, col: 8, row: 5 },
-    // TV on right wall, whiteboard on back wall, corner plant
+    // TV on right wall, interactive blackboard on back wall, corner plant
     { uid: 'conf-tv', type: FurnitureType.PC, col: 11, row: 3 },
-    { uid: 'conf-wb', type: FurnitureType.WHITEBOARD, col: 4, row: 1 },
+    { uid: 'conf-wb', type: FurnitureType.BLACKBOARD, col: 4, row: 1 },
     { uid: 'conf-plant', type: FurnitureType.PLANT, col: 1, row: 1 },
     { uid: 'conf-plant-2', type: FurnitureType.PLANT, col: 11, row: 7 },
 
@@ -303,10 +303,10 @@ export function createDefaultLayout(): OfficeLayout {
     { uid: 'off1-chair-b', type: FurnitureType.CHAIR, col: 3, row: 11 },
     { uid: 'off1-shelf', type: FurnitureType.BOOKSHELF, col: 5, row: 9 },
 
-    // ── Office 2 — Whiteboard — 1 seat ──
+    // ── Office 2 — Research blackboard — 1 seat ──
     { uid: 'off2-desk', type: FurnitureType.DESK, col: 1, row: 15 },
     { uid: 'off2-chair', type: FurnitureType.CHAIR, col: 2, row: 17 },
-    { uid: 'off2-wb', type: FurnitureType.WHITEBOARD, col: 3, row: 15 },
+    { uid: 'off2-wb', type: FurnitureType.BLACKBOARD, col: 3, row: 15 },
     { uid: 'off2-shelf', type: FurnitureType.BOOKSHELF, col: 5, row: 15 },
 
     // ── Office 3 — Double Desk — 2 seats ──
@@ -320,7 +320,7 @@ export function createDefaultLayout(): OfficeLayout {
     { uid: 'off4-desk', type: FurnitureType.DESK, col: 1, row: 23 },
     { uid: 'off4-chair', type: FurnitureType.CHAIR, col: 2, row: 25 },
     { uid: 'off4-pc', type: FurnitureType.PC, col: 3, row: 23 },
-    { uid: 'off4-wb', type: FurnitureType.WHITEBOARD, col: 4, row: 23 },
+    { uid: 'off4-wb', type: FurnitureType.BLACKBOARD, col: 4, row: 23 },
 
     // ── Main Open Area — 4 seats ──
     // Round table + 4 chairs (center of main area)
@@ -331,8 +331,8 @@ export function createDefaultLayout(): OfficeLayout {
     { uid: 'main-chair-4', type: FurnitureType.CHAIR, col: 9, row: 13 },
     // Reception desk (L-shaped, upper main)
     { uid: 'main-recep', type: FurnitureType.DESK, col: 8, row: 9 },
-    // Portable whiteboard + decor
-    { uid: 'main-wb', type: FurnitureType.WHITEBOARD, col: 14, row: 9 },
+    // Portable collaboration blackboard + decor
+    { uid: 'main-wb', type: FurnitureType.BLACKBOARD, col: 14, row: 9 },
     { uid: 'main-plant', type: FurnitureType.PLANT, col: 18, row: 9 },
     { uid: 'main-lamp', type: FurnitureType.LAMP, col: 18, row: 17 },
     { uid: 'main-pc', type: FurnitureType.PC, col: 7, row: 13 },
@@ -382,8 +382,9 @@ export function migrateLayoutColors(layout: OfficeLayout): OfficeLayout {
  * to the new pattern-based system. If tileColors is already present, no migration needed.
  */
 function migrateLayout(layout: OfficeLayout): OfficeLayout {
+  const furniture = migrateBlackboardFurniture(layout.furniture)
   if (layout.tileColors && layout.tileColors.length === layout.tiles.length) {
-    return layout // Already migrated
+    return furniture === layout.furniture ? layout : { ...layout, furniture }
   }
 
   // Check if any tiles use old values (1-4) — these map directly to FLOOR_1-4
@@ -418,5 +419,19 @@ function migrateLayout(layout: OfficeLayout): OfficeLayout {
     }
   }
 
-  return { ...layout, tileColors }
+  return { ...layout, furniture, tileColors }
+}
+
+const DEFAULT_BLACKBOARD_UIDS = new Set(['conf-wb', 'off2-wb', 'off4-wb', 'main-wb'])
+
+function migrateBlackboardFurniture(furniture: PlacedFurniture[]): PlacedFurniture[] {
+  let changed = false
+  const migrated = furniture.map((item) => {
+    if (DEFAULT_BLACKBOARD_UIDS.has(item.uid) && item.type === FurnitureType.WHITEBOARD) {
+      changed = true
+      return { ...item, type: FurnitureType.BLACKBOARD }
+    }
+    return item
+  })
+  return changed ? migrated : furniture
 }
