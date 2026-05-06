@@ -11,6 +11,8 @@ import { deriveAgentPresence } from '../office/presence.js'
 import { vscode } from '../vscodeApi.js'
 import { playDoneSound, setSoundEnabled } from '../notificationSound.js'
 import { upsertAgentChatEntry } from './agentChats.js'
+import { normalizeAgentTodos, summarizeTodos, type AgentTodoItem } from '../components/blackboardModel.js'
+import { ROOM_LABELS, roomForToolStatus, type AgentRoomKind } from '../office/roomRouting.js'
 
 export interface SubagentCharacter {
   id: number
@@ -88,6 +90,8 @@ export interface ExtensionMessageState {
   agentTurnStates: Record<number, AgentTurnState>
   agentProcessStates: Record<number, AgentProcessInfo>
   agentRequests: Record<number, AgentRequestMessage[]>
+  agentTodoLists: Record<number, AgentTodoItem[]>
+  agentRooms: Record<number, AgentRoomKind>
   subagentTools: Record<number, Record<string, ToolActivity[]>>
   subagentCharacters: SubagentCharacter[]
   eventLog: AgentTimelineEvent[]
@@ -96,6 +100,7 @@ export interface ExtensionMessageState {
   workspaceFolders: WorkspaceFolder[]
   kimiSessions: KimiSessionSummary[]
   setSelectedAgent: (id: number | null) => void
+  setAgentRooms: (rooms: Record<number, AgentRoomKind>) => void
 }
 
 const MAX_TIMELINE_EVENTS = 200
@@ -107,7 +112,7 @@ function compactText(text: string | undefined, maxLen = 120): string | undefined
   return `${normalized.slice(0, maxLen - 3)}...`
 }
 
-function saveAgentSeats(os: OfficeState): void {
+export function saveAgentSeats(os: OfficeState): void {
   const seats: Record<number, { palette: number; hueShift: number; seatId: string | null }> = {}
   for (const ch of os.characters.values()) {
     if (ch.isSubagent) continue
@@ -129,6 +134,8 @@ export function useExtensionMessages(
   const [agentTurnStates, setAgentTurnStates] = useState<Record<number, AgentTurnState>>({})
   const [agentProcessStates, setAgentProcessStates] = useState<Record<number, AgentProcessInfo>>({})
   const [agentRequests, setAgentRequests] = useState<Record<number, AgentRequestMessage[]>>({})
+  const [agentTodoLists, setAgentTodoLists] = useState<Record<number, AgentTodoItem[]>>({})
+  const [agentRooms, setAgentRooms] = useState<Record<number, AgentRoomKind>>({})
   const [subagentTools, setSubagentTools] = useState<Record<number, Record<string, ToolActivity[]>>>({})
   const [subagentCharacters, setSubagentCharacters] = useState<SubagentCharacter[]>([])
   const [eventLog, setEventLog] = useState<AgentTimelineEvent[]>([])
@@ -285,6 +292,18 @@ export function useExtensionMessages(
           delete next[id]
           return next
         })
+        setAgentTodoLists((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+        setAgentRooms((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
         setSubagentTools((prev) => {
           if (!(id in prev)) return prev
           const next = { ...prev }
@@ -314,6 +333,26 @@ export function useExtensionMessages(
           }
           return merged.sort((a, b) => a - b)
         })
+      } else if (msg.type === 'agentTodoList') {
+        const id = msg.agentId as number
+        const todos = normalizeAgentTodos(msg.todos)
+        setAgentTodoLists((prev) => {
+          const next = { ...prev }
+          if (todos.length === 0) {
+            delete next[id]
+          } else {
+            next[id] = todos
+          }
+          return next
+        })
+        const summary = summarizeTodos(todos)
+        appendEvent({
+          type: 'agentTodoList',
+          agentId: id,
+          title: 'TODO updated',
+          detail: todos.length > 0 ? `${summary.done}/${summary.total} done` : 'cleared',
+          presence: deriveAgentPresence(id, agentToolsRef.current, agentStatusesRef.current, subagentToolsRef.current),
+        })
       } else if (msg.type === 'agentToolStart') {
         const id = msg.id as number
         const toolId = msg.toolId as string
@@ -336,6 +375,19 @@ export function useExtensionMessages(
         os.setAgentTool(id, toolName)
         os.setAgentActive(id, true)
         os.clearPermissionBubble(id)
+        const targetRoom = roomForToolStatus(status)
+        if (targetRoom && os.moveAgentToRoom(id, targetRoom)) {
+          setAgentRooms((prev) => ({ ...prev, [id]: targetRoom }))
+          appendEvent({
+            type: 'agentRoomRouted',
+            agentId: id,
+            title: 'Room routed',
+            detail: ROOM_LABELS[targetRoom],
+            toolId,
+            presence: 'active',
+          })
+          saveAgentSeats(os)
+        }
         // Create sub-agent character for Task tool subtasks
         if (isSubtask) {
           const label = status.slice('Subtask:'.length).trim()
@@ -744,6 +796,8 @@ export function useExtensionMessages(
     agentTurnStates,
     agentProcessStates,
     agentRequests,
+    agentTodoLists,
+    agentRooms,
     subagentTools,
     subagentCharacters,
     eventLog,
@@ -752,5 +806,6 @@ export function useExtensionMessages(
     workspaceFolders,
     kimiSessions,
     setSelectedAgent,
+    setAgentRooms,
   }
 }

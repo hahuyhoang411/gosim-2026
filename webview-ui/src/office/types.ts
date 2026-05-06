@@ -89,6 +89,8 @@ export type AgentTimelineEventType =
   | 'agentTurnState'
   | 'agentProcessState'
   | 'agentRequest'
+  | 'agentTodoList'
+  | 'agentRoomRouted'
   | 'agentToolStart'
   | 'agentToolDone'
   | 'agentToolPermission'
